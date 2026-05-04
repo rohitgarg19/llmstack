@@ -1,18 +1,23 @@
 # ----------------------------------------------------------------------------
-# .gitignore for opencode/ (llmstack)
+# .gitignore for opencode/ (the llmstack package)
 #
-# Single source of truth = ./models.ini.
-# Everything else under llmstack/ that's auto-generated, downloaded, or runtime
-# state is excluded from version control - it is reproducible from:
+# Single source of truth = llmstack/models.ini (the bundled template).
+# Each project's working copy lives at .llmstack/models.ini and is
+# auto-seeded from the template on first `llmstack install` -- it is
+# *not* version-controlled, since it's per-project state.
+# Everything else that's auto-generated, downloaded, or runtime state is
+# excluded from version control - it is reproducible from:
 #
-#   bash llmstack/llmstack.sh setup        # downloads + generates configs
-#   bash llmstack/llmstack.sh install      # generates configs only
+#   pip install -e .
+#   llmstack setup        # downloads + binary
+#   llmstack install      # generates configs
 #
 # Tracked things you SHOULD see in `git status`:
-#   models.ini
-#   llmstack/README.md, UPGRADING.md, requirements.txt
-#   llmstack/src/*.py
-#   llmstack/llmstack.sh   (single entry point for all stack actions)
+#   pyproject.toml
+#   README.md, UPGRADING.md
+#   llmstack/**/*.py
+#   llmstack/AGENTS.md     (template, shipped as package data)
+#   llmstack/models.ini    (template, shipped as package data)
 # ----------------------------------------------------------------------------
 
 # --- Python -----------------------------------------------------------------
@@ -20,6 +25,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+build/
+dist/
 .venv/
 venv/
 env/
@@ -36,38 +43,27 @@ Thumbs.db
 *.swo
 
 # --- llmstack runtime state -------------------------------------------------
-# Per-cwd .run/ directory, created wherever `llmstack.sh` is invoked.
-# Contains: opencode.json, AGENTS.md (copy of template), pid files,
-# active-channel marker, llama-swap.next.yaml sidecar, llmstack.bashrc /
-# zdotdir for prompt prefix, logs/llama-swap.log, logs/router.log,
-# logs/dl-*.log. All regenerated on demand.
+# Per-cwd state directory, created wherever `llmstack` is invoked. Contains:
+# opencode.json, AGENTS.md (copy of template), llama-swap.yaml, pid files,
+# active-channel marker, models.ini (auto-seeded from the bundled template
+# on first `install`), logs/llama-swap.log, logs/router.log, logs/dl-*.log.
+# All regenerated on demand -- the version-controlled source is the
+# bundled `llmstack/models.ini` template inside the package.
+.llmstack/
+
+# Legacy state dirs from earlier versions of the script. Kept here so
+# old logs / configs left over from a previous layout don't get
+# accidentally committed.
 .run/
-
-# Legacy log path (logs are now under .run/logs/). Kept here so old logs
-# left over from earlier versions of the script don't get accidentally
-# committed.
 llmstack/logs/
-
-# --- Vendored binary --------------------------------------------------------
-# Mach-O arm64 binary, ~14 MB. Re-download from:
-#   https://github.com/mostlygeek/llama-swap/releases
-llmstack/bin/llama-swap
-
-# --- Auto-generated configs -------------------------------------------------
-# Auto-generated from models.ini via:
-#   - llmstack/src/gen_llama_swap_yaml.py  -> llmstack/llama-swap.yaml
-#   - llmstack/src/gen_opencode_config.py  -> <work-dir>/.run/opencode.json
-# (the latter is covered by the .run/ rule above)
-# Regenerate with: bash llmstack/llmstack.sh install
 llmstack/llama-swap.yaml
-
-# Legacy: project-root opencode.json was a manual seed before the installer
-# existed. Real one now lives at <work-dir>/.run/opencode.json and is
-# rendered fresh by `llmstack.sh install`. Safe to delete from disk.
-/opencode.json
+llmstack/bin/
 
 # --- Install-time artefacts -------------------------------------------------
-# In-flight temp files from mktemp (cleaned up by trap RETURN, but may
-# linger if the script is killed mid-render).
+# In-flight temp files written by the atomic-render helper.
 .opencode.json.*
 .llama-swap.yaml.*
+
+# Legacy: project-root opencode.json was a manual seed before the installer
+# existed. Real one now lives at <work-dir>/.llmstack/opencode.json.
+/opencode.json

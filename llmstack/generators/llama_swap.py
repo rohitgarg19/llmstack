@@ -1,35 +1,31 @@
 """Generate ``llama-swap.yaml`` from ``models.ini``.
 
-Single source of truth: ``models.ini`` in the project root.
+Single source of truth: ``models.ini``. Top-level config (logging,
+healthcheck, the ``llama_server`` binary path, the ``metal_defaults``
+macro, the ``matrix`` and the ``on_startup.preload`` list) and per-tier
+``cmd`` blocks are all DERIVED from the ini.
 
-Top-level config (healthCheckTimeout, logLevel, ...), the ``llama_server``
-binary path, the ``metal_defaults`` macro, the ``matrix`` (vars,
-evict_costs, sets) and the ``on_startup.preload`` list are all DERIVED
-from ``models.ini``:
-
-  - llama_server   = LLAMA_SERVER_BIN (or `llama_server_bin =` in [DEFAULT])
-  - metal_defaults = built from [DEFAULT] (host, n_gpu_layers, flash_attn,
-                     jinja, threads, cache_type_k, cache_type_v) plus baked-in
-                     `--no-warmup --no-mmap`.
-  - matrix.vars    = role -> single-letter from ROLE_LETTER, value = tier name
-  - matrix.evict_costs = max(1, min(30, round(size_gb / 1.5)))
-  - matrix.sets    = `f & X` for each non-fast tier, plus `all_chats` =
-                     `f & p & u` when 2+ chat tiers exist.
-  - preload        = every tier with role == "fast"
+  - ``llama_server``    = ``[DEFAULT].llama_server_bin`` or the baked-in default
+  - ``metal_defaults``  = built from ``[DEFAULT]`` (host, n_gpu_layers, ...) +
+                          baked-in ``--no-warmup --no-mmap``.
+  - ``matrix.vars``     = role -> single-letter from :data:`ROLE_LETTER`,
+                          value = tier name
+  - ``matrix.evict_costs`` = ``max(1, min(30, round(size_gb / 1.5)))``
+  - ``matrix.sets``     = ``f & X`` per non-fast tier, plus an
+                          ``all_chats_with_fast`` super-set when there
+                          are 2+ chat tiers.
+  - ``preload``         = every tier with ``role == "fast"``
 
 Per-tier defaults (overridable in the ini per section):
 
-  - aliases : ROLE_ALIASES[role]               (override: `aliases = a, b, c`)
-  - ttl     : ROLE_TTL[role]                   (override: `ttl = 0`)
+  - ``aliases`` : :data:`ROLE_ALIASES`\\[role]   (override: ``aliases = a, b, c``)
+  - ``ttl``     : :data:`ROLE_TTL`\\[role]       (override: ``ttl = 0``)
 
-CLI:
-  python src/gen_llama_swap_yaml.py             # print YAML to stdout
-  python src/gen_llama_swap_yaml.py PATH        # write YAML to PATH
-  python src/gen_llama_swap_yaml.py --use-next  # swap to hf_file_next per tier
-                                                #   (or set LLMSTACK_USE_NEXT=1)
-                                                # Tiers without hf_file_next stay
-                                                # on their current file. Used by
-                                                # `bash llmstack.sh start --next`.
+CLI (kept for scripting; the public entry point is ``llmstack install``):
+
+  python -m llmstack.generators.llama_swap                 # YAML to stdout
+  python -m llmstack.generators.llama_swap PATH            # write YAML to PATH
+  python -m llmstack.generators.llama_swap --use-next ...  # swap hf_file_next
 """
 
 from __future__ import annotations
@@ -42,11 +38,10 @@ from pathlib import Path
 
 import yaml
 
-from tiers import INI_PATH, _int, load_tiers
+from llmstack.paths import models_ini_path
+from llmstack.tiers import _int, load_tiers
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
-
-# --- Defaults baked into the generator -------------------------------------
 
 LLAMA_SERVER_BIN_DEFAULT = "/opt/homebrew/bin/llama-server"
 HEALTH_CHECK_TIMEOUT = 600
@@ -55,7 +50,6 @@ LOG_TO_STDOUT = "proxy"
 START_PORT = 10001
 GLOBAL_TTL = 0
 
-# Role -> single-letter symbol used in matrix expressions.
 ROLE_LETTER: dict[str, str] = {
     "fast":            "f",
     "agent":           "c",
@@ -63,7 +57,6 @@ ROLE_LETTER: dict[str, str] = {
     "plan-uncensored": "u",
 }
 
-# Role -> default aliases (overridable via ``aliases =`` in the ini section).
 ROLE_ALIASES: dict[str, list[str]] = {
     "fast":            ["fast", "small", "autocomplete"],
     "agent":           ["agent", "smart", "code", "coder"],
@@ -71,7 +64,6 @@ ROLE_ALIASES: dict[str, list[str]] = {
     "plan-uncensored": ["uncensored", "nofilter", "plan-nofilter", "heretic"],
 }
 
-# Role -> default TTL seconds (0 = never unload). Overridable via ``ttl =``.
 ROLE_TTL: dict[str, int] = {
     "fast":            0,
     "agent":           1800,
@@ -86,8 +78,6 @@ ROPE_RE = re.compile(
 SAMPLER_RE = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
 SIZE_RE = re.compile(r"[\d.]+")
 
-
-# --- Small parsers ---------------------------------------------------------
 
 def parse_sampler(raw: str) -> dict[str, float]:
     return {k: float(v) for k, v in SAMPLER_RE.findall(raw or "")}
@@ -113,8 +103,6 @@ def is_truthy(raw: str | None, default: bool = True) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-# --- Building blocks -------------------------------------------------------
-
 def build_metal_defaults(d) -> str:
     """The shared llama-server flags used by every model."""
     parts = [
@@ -136,12 +124,7 @@ def build_metal_defaults(d) -> str:
 
 
 def build_cmd(tier, section, *, use_next: bool = False) -> str:
-    """The multi-line ``cmd`` literal block scalar for one tier.
-
-    When ``use_next=True`` and the tier defines ``hf_file_next``, the active
-    ``-hf``/``-hff`` pair is swapped to the queued upgrade target. Tiers
-    without a queued upgrade are unchanged in either mode.
-    """
+    """The multi-line ``cmd`` literal block scalar for one tier."""
     sampler = parse_sampler(section.get("sampler", ""))
     rope = parse_rope(section.get("rope_scaling", ""))
 
@@ -158,21 +141,21 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
     if running_next:
         lines += [
             f"# >>> RUNNING NEXT ({tier.name}): this YAML was generated with --use-next.",
-            "# To revert, regenerate without --use-next (default for `llmstack.sh start`).",
-            "# Permanent promotion: edit hf_file in models.ini and re-run `llmstack.sh install`.",
-            f"# Previous current file (still cached, still loadable):",
+            "# To revert, regenerate without --use-next (default for `llmstack start`).",
+            "# Permanent promotion: edit hf_file in models.ini and re-run `llmstack install`.",
+            "# Previous current file (still cached, still loadable):",
             f"#   -hff {tier.file}",
         ]
     else:
         lines += [
             f"# >>> UPGRADE-POINT ({tier.name}): swap the -hf/-hff pair below to change this tier.",
-            "# See UPGRADING.md. To change permanently, edit models.ini and re-run `llmstack.sh install`.",
+            "# See UPGRADING.md. To change permanently, edit models.ini and re-run `llmstack install`.",
         ]
         if has_queued:
             lines += [
-                "# Queued upgrade target (already pre-fetched if `llmstack.sh download` has run):",
+                "# Queued upgrade target (already pre-fetched if `llmstack download` has run):",
                 f"#   -hff {tier.file_next}",
-                "# Try it without committing: bash llmstack.sh start --next",
+                "# Try it without committing: llmstack start --next",
             ]
 
     lines += [
@@ -265,14 +248,12 @@ def build_matrix(cfg) -> dict:
                 continue
             slug = (tiers[name].role or letter).replace("-", "_")
             sets[f"{slug}_with_fast"] = f"{fast} & {letter}"
-        chat_letters = [l for l in vars_ if l != fast and l != "c"]
+        chat_letters = [letter for letter in vars_ if letter not in (fast, "c")]
         if len(chat_letters) >= 2:
             sets["all_chats_with_fast"] = f"{fast} & " + " & ".join(chat_letters)
 
     return {"vars": vars_, "evict_costs": evict, "sets": sets}
 
-
-# --- YAML emission ---------------------------------------------------------
 
 def _str_presenter(dumper, data):
     if "\n" in data:
@@ -283,20 +264,20 @@ def _str_presenter(dumper, data):
 HEADER_CURRENT = """\
 # yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
 #
-# AUTO-GENERATED by src/gen_llama_swap_yaml.py from ../models.ini.
-# Hand edits will be overwritten on the next `bash llmstack.sh install`.
+# AUTO-GENERATED by llmstack.generators.llama_swap from models.ini.
+# Hand edits will be overwritten on the next `llmstack install`.
 # To change behaviour, edit models.ini (per-tier or [DEFAULT]) and re-run install.
 """
 
 HEADER_NEXT = """\
 # yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
 #
-# AUTO-GENERATED by src/gen_llama_swap_yaml.py --use-next from ../models.ini.
-# This is the EPHEMERAL "next" config used by `bash llmstack.sh start --next`.
+# AUTO-GENERATED by llmstack.generators.llama_swap --use-next from models.ini.
+# This is the EPHEMERAL "next" config used by `llmstack start --next`.
 # Tiers with hf_file_next defined are running their queued upgrade target;
 # all other tiers are unchanged. Do not commit this file. To make any of
 # these promotions permanent, edit hf_file in models.ini and re-run
-# `bash llmstack.sh install` - that regenerates the canonical llama-swap.yaml.
+# `llmstack install` -- that regenerates the canonical llama-swap.yaml.
 """
 
 
@@ -305,7 +286,7 @@ def build_config(*, use_next: bool = False) -> dict:
         inline_comment_prefixes=(";",),
         interpolation=None,
     )
-    cfg.read(INI_PATH)
+    cfg.read(models_ini_path())
     defaults = cfg["DEFAULT"]
 
     llama_bin = (defaults.get("llama_server_bin") or LLAMA_SERVER_BIN_DEFAULT).strip()
@@ -334,8 +315,25 @@ def build_config(*, use_next: bool = False) -> dict:
     }
 
 
+def render(*, use_next: bool = False) -> str:
+    """Return the full YAML document (header + body) as a string."""
+    yaml.add_representer(str, _str_presenter, Dumper=yaml.SafeDumper)
+    body = yaml.safe_dump(
+        build_config(use_next=use_next),
+        sort_keys=False,
+        default_flow_style=False,
+        width=200,
+    )
+    header = HEADER_NEXT if use_next else HEADER_CURRENT
+    return header + "\n" + body
+
+
+def validate(path: Path) -> None:
+    """Cheap structural sanity check: parses cleanly as YAML."""
+    yaml.safe_load(path.read_text())
+
+
 def _parse_argv(argv: list[str]) -> tuple[str, bool]:
-    """Returns (output_path, use_next). Output ``-`` means stdout."""
     use_next = (
         os.getenv(USE_NEXT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
     )
@@ -354,15 +352,7 @@ def _parse_argv(argv: list[str]) -> tuple[str, bool]:
 
 def main(argv: list[str]) -> int:
     target, use_next = _parse_argv(argv)
-    yaml.add_representer(str, _str_presenter, Dumper=yaml.SafeDumper)
-    body = yaml.safe_dump(
-        build_config(use_next=use_next),
-        sort_keys=False,
-        default_flow_style=False,
-        width=200,
-    )
-    header = HEADER_NEXT if use_next else HEADER_CURRENT
-    text = header + "\n" + body
+    text = render(use_next=use_next)
     if target == "-":
         sys.stdout.write(text)
     else:

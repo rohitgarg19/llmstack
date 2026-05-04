@@ -1,16 +1,20 @@
-"""Generate opencode.json from models.ini.
+"""Generate ``opencode.json`` from ``models.ini``.
 
-Reads ../../models.ini and writes an opencode config to the path given as
-the first CLI argument, or stdout if omitted / '-'.
+Reads the models.ini located by :func:`llmstack.paths.models_ini_path` and
+writes an opencode config to the path given as the first CLI argument
+(or stdout if omitted).
 
 What gets wired:
-  provider       single llama.cpp-compatible provider at router_port
-  model          auto  (FastAPI router classifies and rewrites model names)
-  small_model    tier with role=fast  (tab-complete, titles)
-  agent.build    role=agent   — full permissions, tool use
-  agent.plan     role=plan    — read-only, no bash
-  agent.plan-nofilter  role=plan-uncensored  — read-only, no bash
-  command./review, /nofilter  — shortcuts that can't be auto-classified
+
+  provider              single llama.cpp-compatible provider at router_port
+  model                 ``auto``  (FastAPI router classifies and rewrites
+                                  model names)
+  small_model           tier with ``role=fast``  (tab-complete, titles)
+  agent.build           ``role=agent``           -- full permissions, tool use
+  agent.plan            ``role=plan``            -- read-only, no bash
+  agent.plan-nofilter   ``role=plan-uncensored`` -- read-only, no bash
+  command./review,
+  command./nofilter     shortcuts that the router can't auto-classify
 """
 
 from __future__ import annotations
@@ -22,32 +26,21 @@ import re
 import sys
 from pathlib import Path
 
-HERE         = Path(__file__).resolve().parent   # llmstack/src/
-LLMSTACK_DIR = HERE.parent                       # llmstack/
-PROJECT_ROOT = LLMSTACK_DIR.parent               # ../
-
-_default_ini = PROJECT_ROOT / "models.ini"
-INI_PATH = Path(os.environ["LLMSTACK_MODELS_INI"]) if "LLMSTACK_MODELS_INI" in os.environ else _default_ini
+from llmstack.paths import AGENTS_TEMPLATE, models_ini_path, remote_url
 
 PROVIDER_KEY = "llama.cpp"
 API_KEY      = "sk-no-key-required"
 
-# role value in models.ini -> how it surfaces in opencode
 ROLE_MAP: dict[str, tuple[str, str | None]] = {
-    # role          kind          agent name
     "fast":            ("small_model", None),
     "agent":           ("agent",       "build"),
     "plan":            ("agent",       "plan"),
     "plan-uncensored": ("agent",       "plan-nofilter"),
 }
 
-# Agents that should be read-only (no file edits, no bash exec)
 READ_ONLY_AGENTS = {"plan", "plan-nofilter"}
 
-# Slash-commands that are genuinely useful shortcuts:
-#   /review  — forces the planning model and prepends a review framing
-#   /nofilter — injects the [nofilter] trigger that the router watches for
-# (No /fast: `auto` already routes trivial queries to the fast tier.)
+# Slash-command shortcuts (no `/fast`: `auto` already routes trivial chat).
 COMMANDS = {
     "review": {
         "template":    "Review the following for trade-offs, risks, and follow-ups. Be concrete.",
@@ -61,7 +54,6 @@ COMMANDS = {
     },
 }
 
-# Top-level policy (env-overridable at install time)
 SHARE        = os.getenv("OPENCODE_SHARE", "disabled")
 USERNAME     = os.getenv("OPENCODE_USERNAME") or None
 
@@ -76,13 +68,16 @@ DISABLED_PROVIDERS = [
     if p.strip()
 ]
 
-# Instructions file: copied into .llmstack/ by `install`; path injected via
-# OPENCODE_INSTRUCTIONS env var so each project gets its own copy.
-_DEFAULT_INSTRUCTIONS = str(LLMSTACK_DIR / "AGENTS.md")
-INSTRUCTIONS = [
-    p for p in os.getenv("OPENCODE_INSTRUCTIONS", _DEFAULT_INSTRUCTIONS).split(":")
-    if p
-]
+
+def _instructions_paths() -> list[str]:
+    """Resolve the ``instructions`` array in opencode.json.
+
+    Honours ``OPENCODE_INSTRUCTIONS`` (colon-separated) for the per-project
+    install path; falls back to the bundled template inside the package.
+    """
+    raw = os.getenv("OPENCODE_INSTRUCTIONS", str(AGENTS_TEMPLATE))
+    return [p for p in raw.split(":") if p]
+
 
 ZERO_COST  = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 SAMPLER_KV = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
@@ -98,17 +93,28 @@ def _sampler(raw: str) -> dict[str, float]:
     return {k: float(v) for k, v in SAMPLER_KV.findall(raw or "")}
 
 
-def build_config(ini_path: Path = INI_PATH) -> dict:
-    if not ini_path.exists():
-        raise SystemExit(f"models.ini not found at {ini_path}")
+def build_config(ini_path: Path | None = None) -> dict:
+    path = ini_path or models_ini_path()
+    if not path.exists():
+        raise SystemExit(f"models.ini not found at {path}")
 
     cfg = configparser.ConfigParser(inline_comment_prefixes=(";",), interpolation=None)
-    cfg.read(ini_path)
+    cfg.read(path)
 
     defaults = cfg["DEFAULT"]
-    host     = (defaults.get("host") or "127.0.0.1").strip()
-    port     = (defaults.get("router_port") or "10101").strip()
-    base_url = f"http://{host}:{port}/v1"
+    rurl = remote_url()
+    if rurl:
+        # Client mode: send all traffic to the remote router. Keep the
+        # tier / agent wiring derived from the local models.ini -- the
+        # remote stack is expected to expose the same tier names; tier
+        # ``ctx_size``, sampler, etc. are useful client-side hints
+        # (used by opencode for prompt-packing) regardless of where the
+        # actual model lives.
+        base_url = f"{rurl}/v1"
+    else:
+        host     = (defaults.get("host") or "127.0.0.1").strip()
+        port     = (defaults.get("router_port") or "10101").strip()
+        base_url = f"http://{host}:{port}/v1"
 
     tier_sections = [s for s in cfg.sections() if s != "ROUTING"]
 
@@ -173,8 +179,10 @@ def build_config(ini_path: Path = INI_PATH) -> dict:
         out["username"] = USERNAME
     if DISABLED_PROVIDERS:
         out["disabled_providers"] = DISABLED_PROVIDERS
-    if INSTRUCTIONS:
-        out["instructions"] = INSTRUCTIONS
+
+    instructions = _instructions_paths()
+    if instructions:
+        out["instructions"] = instructions
 
     out["provider"] = {
         PROVIDER_KEY: {
@@ -188,16 +196,24 @@ def build_config(ini_path: Path = INI_PATH) -> dict:
     if small_model:
         out["small_model"] = small_model
     if agents:
-        # Stable order in the picker
         out["agent"] = {k: agents[k] for k in ("build", "plan", "plan-nofilter") if k in agents}
     out["command"] = COMMANDS
     return out
 
 
+def render() -> str:
+    """Return the full opencode.json text (with trailing newline)."""
+    return json.dumps(build_config(), indent=2) + "\n"
+
+
+def validate(path: Path) -> None:
+    """Cheap structural sanity check: parses cleanly as JSON."""
+    json.loads(path.read_text())
+
+
 def main(argv: list[str]) -> int:
     target = argv[1] if len(argv) > 1 else "-"
-    cfg = build_config()
-    text = json.dumps(cfg, indent=2) + "\n"
+    text = render()
     if target == "-":
         sys.stdout.write(text)
     else:

@@ -1,31 +1,43 @@
 """
-Auto-router proxy in front of llama-swap.
+FastAPI auto-router proxy in front of llama-swap.
 
-Public endpoint: http://127.0.0.1:10101
-Upstream:        http://127.0.0.1:10102 (llama-swap)
+Public endpoint: ``http://127.0.0.1:10101``
+Upstream:        ``http://127.0.0.1:10102`` (llama-swap)
 
 Behaviour:
-  * /v1/models                       -> proxied verbatim, plus an "auto" entry.
-  * /v1/chat/completions, /v1/completions
-        - if request body model == "auto" (or unset), classify the request and
-          rewrite model -> one of: code-fast, code-smart, plan, plan-uncensored.
-        - otherwise pass through unchanged.
-  * Streaming (SSE) responses are forwarded chunk-by-chunk.
-  * Anything else is reverse-proxied.
+
+* ``GET /v1/models``                       -> proxied verbatim, plus an
+                                              ``auto`` entry.
+* ``POST /v1/chat/completions``,
+  ``POST /v1/completions``
+    - if request body ``model == "auto"`` (or unset), classify the request
+      and rewrite ``model`` -> one of: ``code-fast``, ``code-smart``,
+      ``plan``, ``plan-uncensored``.
+    - otherwise pass through unchanged.
+* Streaming (SSE) responses are forwarded chunk-by-chunk.
+* Anything else is reverse-proxied.
 
 Routing decision tree (first match wins):
 
   1. Explicit "uncensored" trigger in the last user message
-     (e.g. starts with "[nofilter]", "uncensored:", or contains "[uncensored]")
-                                                       -> plan-uncensored
-  2. Tools array non-empty (agent / function-calling)  -> code-smart
-  3. >= MULTI_TURN_THRESHOLD turns (agent loop)        -> code-smart
-  4. Estimated input tokens > FAST_TOKEN_BUDGET        -> code-smart
-  5. Code blocks (```) or AGENT signal words           -> code-smart
-     ("implement", "fix bug", "write a function", "refactor", "debug", ...)
-  6. PLAN signal words                                 -> plan
-     ("design", "architect", "approach", "trade-off", "should we", ...)
-  7. default                                           -> code-fast
+     (e.g. starts with ``[nofilter]``, ``uncensored:``, or contains
+     ``[uncensored]``)                                   -> plan-uncensored
+  2. Tools array non-empty (agent / function-calling)    -> code-smart
+  3. >= MULTI_TURN_THRESHOLD turns (agent loop)          -> code-smart
+  4. Estimated input tokens > FAST_TOKEN_BUDGET          -> code-smart
+  5. Code blocks (triple-backticks) or AGENT signal words -> code-smart
+     (``implement``, ``fix bug``, ``write a function``,
+     ``refactor``, ``debug``, ...)
+  6. PLAN signal words                                   -> plan
+     (``design``, ``architect``, ``approach``,
+     ``trade-off``, ``should we``, ...)
+  7. default                                             -> code-fast
+
+Run with::
+
+    python -m llmstack.app
+    # or
+    uvicorn llmstack.app:app --host 127.0.0.1 --port 10101
 """
 
 from __future__ import annotations
@@ -40,7 +52,6 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-# ---------------------------------------------------------------------------
 UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
 
 FAST_MODEL = os.getenv("ROUTER_FAST_MODEL", "code-fast")
@@ -52,16 +63,12 @@ FAST_TOKEN_BUDGET = int(os.getenv("ROUTER_FAST_TOKEN_BUDGET", "4000"))
 MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "6"))
 AUTO_ALIASES = {"auto", "", None}
 
-# Explicit uncensored opt-in. Matches:
-#   "[nofilter]" / "[uncensored]" / "[heretic]" anywhere
-#   "uncensored:" / "nofilter:" / "no-filter:" at the start of a line
 UNCENSORED_TRIGGERS = re.compile(
     r"(\[(uncensored|nofilter|no-?filter|heretic)\]"
     r"|^[ \t]*(uncensored|nofilter|no-?filter)\s*:)",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Plan-mode signals: design/discussion/architecture
 PLAN_SIGNALS = re.compile(
     r"\b(plan|design|architect(ure)?|approach|trade-?off|"
     r"should\s+we|how\s+would\s+(you|we)|what\s+would\s+you|"
@@ -72,7 +79,6 @@ PLAN_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
-# Agent/build signals: doing work
 AGENT_SIGNALS = re.compile(
     r"\b(implement|fix\s+(this|the|a|my)?\s*(bug|issue|error|test)|"
     r"write\s+(a|the|some)?\s*(function|class|test|script|module|method)|"
@@ -83,7 +89,6 @@ AGENT_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
-# Code blocks or backtick-fenced code
 CODE_BLOCK = re.compile(r"```|`[^`\n]{30,}`")
 
 logging.basicConfig(
@@ -91,7 +96,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s router %(message)s",
 )
 log = logging.getLogger("router")
-# ---------------------------------------------------------------------------
 
 app = FastAPI(title="llmstack-auto-router", version="2.0")
 client: httpx.AsyncClient | None = None
@@ -167,39 +171,35 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     messages = body.get("messages") if isinstance(body.get("messages"), list) else None
     prompt = body.get("prompt") if isinstance(body.get("prompt"), str) else None
 
-    # 1. explicit uncensored opt-in (only checked on the most recent user turn
-    #    + the system prompt to avoid stale triggers polluting later turns)
     last_user = _last_user_text(messages)
-    sys_prompts = [m.get("content", "") for m in (messages or []) if m.get("role") == "system" and isinstance(m.get("content"), str)]
+    sys_prompts = [
+        m.get("content", "")
+        for m in (messages or [])
+        if m.get("role") == "system" and isinstance(m.get("content"), str)
+    ]
     if any(UNCENSORED_TRIGGERS.search(s) for s in (last_user, *sys_prompts) if s):
         return UNCENSORED_MODEL, "uncensored-trigger"
 
-    # 2. tools / function calling -> agent
     tools = body.get("tools") or []
     if tools:
         return AGENT_MODEL, f"tools={len(tools)}"
 
-    # 3. multi-turn conversation -> agent loop
     n_turns = len(messages) if messages else 0
     if n_turns >= MULTI_TURN_THRESHOLD:
         return AGENT_MODEL, f"turns={n_turns}"
 
-    # 4. heavy context -> agent
     est = _estimate_tokens(messages, prompt)
     if est > FAST_TOKEN_BUDGET:
         return AGENT_MODEL, f"tokens~{est}"
 
-    # 5. code blocks or agent verbs -> agent
     if _matches(CODE_BLOCK, messages, prompt):
         return AGENT_MODEL, "code-block"
     if _matches(AGENT_SIGNALS, messages, prompt):
         return AGENT_MODEL, "agent-signal"
 
-    # 6. plan signals -> plan
     if _matches(PLAN_SIGNALS, messages, prompt):
         return PLAN_MODEL, "plan-signal"
 
-    # 7. trivial chat -> fast coder
     return FAST_MODEL, "default"
 
 
@@ -317,21 +317,18 @@ async def completions(req: Request) -> Response:
 
 # --------------------------- catch-all reverse proxy -----------------------
 
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+@app.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
 async def passthrough(path: str, req: Request) -> Response:
     raw = await req.body()
     headers = _filter_request_headers(req)
     return await _stream_proxy(req.method, "/" + path, raw, headers)
 
 
-if __name__ == "__main__":
-    # TCP only: opencode (and any other HTTP client) dials ROUTER_HOST:ROUTER_PORT.
-    # Note: llama-swap (upstream) only accepts TCP via --listen ip:port and does
-    # not support Unix domain sockets, so UDS is not viable at that layer either.
-    #
-    # We pass the app object directly (not the "router:app" string) so uvicorn
-    # does not need to import by module name, meaning the script can be launched
-    # from any working directory without a prior `cd src/`.
+def main() -> None:
+    """Run the router with uvicorn. Used by ``python -m llmstack.app``."""
     import asyncio
 
     import uvicorn
@@ -342,3 +339,7 @@ if __name__ == "__main__":
 
     cfg = uvicorn.Config(app, host=host, port=port, log_level=log_level)
     asyncio.run(uvicorn.Server(cfg).serve())
+
+
+if __name__ == "__main__":
+    main()

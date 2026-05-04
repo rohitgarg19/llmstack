@@ -1,36 +1,29 @@
-"""Tier inventory: parse ``models.ini`` and expose Python objects.
+"""Tier inventory: parse ``models.ini`` into Python objects.
 
-This is the **data layer** for the stack - the single source of truth for
+This is the **data layer** for the stack -- the single source of truth for
 "what tiers exist and where their GGUFs live". Used by:
 
-  - ``src/check_models.py``         snapshot table + HF metadata lookup
-  - ``bash llmstack.sh download``  via ``python src/tiers.py --downloads``
+  - :mod:`llmstack.check_models`         snapshot table + HF metadata lookup
+  - :mod:`llmstack.download.ggufs`       drives the downloader
 
-Stdlib only - safe to call before the venv has any extra packages installed.
+Stdlib only -- safe to import before any extra dependency is present.
 
-CLI:
+CLI (kept for backwards-compatible scripting):
 
-  python src/tiers.py                 # human-readable summary
-  python src/tiers.py --downloads     # TSV: tag<TAB>repo<TAB>file<TAB>label
-                                      #   one row per file to cache
-                                      #   (current + next, when defined)
+  python -m llmstack.tiers                 # human-readable summary
+  python -m llmstack.tiers --downloads     # TSV: tag<TAB>repo<TAB>file<TAB>label
 """
 
 from __future__ import annotations
 
 import configparser
-import os
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent          # llmstack/src/
-LLMSTACK_DIR = HERE.parent                      # llmstack/
-PROJECT_ROOT = LLMSTACK_DIR.parent              # ../
-
-_default_ini = PROJECT_ROOT / "models.ini"
-INI_PATH = Path(os.environ["LLMSTACK_MODELS_INI"]) if "LLMSTACK_MODELS_INI" in os.environ else _default_ini
+from llmstack.paths import models_ini_path, require_models_ini
 
 DIGITS = re.compile(r"\d+")
 
@@ -79,20 +72,19 @@ class Tier:
         return out
 
 
-def load_tiers(ini_path: Path = INI_PATH) -> dict[str, Tier]:
+def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
     """Parse ``models.ini`` into a dict of tier-name -> Tier.
 
     Tiers without an ``hf_repo`` + ``hf_file`` pair are skipped silently
     (e.g. the ``[ROUTING]`` block).
     """
-    if not ini_path.exists():
-        raise SystemExit(f"models.ini not found at {ini_path}")
+    path = ini_path or require_models_ini()
 
     cfg = configparser.ConfigParser(
         inline_comment_prefixes=(";",),
         interpolation=None,
     )
-    cfg.read(ini_path)
+    cfg.read(path)
 
     tiers: dict[str, Tier] = {}
     for sec in cfg.sections():
@@ -116,8 +108,8 @@ def load_tiers(ini_path: Path = INI_PATH) -> dict[str, Tier]:
     return tiers
 
 
-def iter_download_targets(ini_path: Path = INI_PATH):
-    """Yield every ``TierFile`` worth caching, across all tiers."""
+def iter_download_targets(ini_path: Path | None = None) -> Iterator[TierFile]:
+    """Yield every :class:`TierFile` worth caching, across all tiers."""
     for tier in load_tiers(ini_path).values():
         yield from tier.files()
 
@@ -128,8 +120,9 @@ def main(argv: list[str]) -> int:
             print(f"{tf.tag}\t{tf.repo}\t{tf.file}\t{tf.label}")
         return 0
 
-    # default: human-readable summary
-    for tier in load_tiers().values():
+    path = models_ini_path()
+    print(f"# tiers loaded from {path}\n")
+    for tier in load_tiers(path).values():
         print(f"[{tier.name}]  role={tier.role}  ctx={tier.ctx_size}")
         print(f"  current : {tier.repo} / {tier.file}")
         if tier.file_next:

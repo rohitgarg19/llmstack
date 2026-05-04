@@ -9,7 +9,7 @@ target if defined) with:
   - DRIFT marker when ``models.ini`` and ``llama-swap.yaml`` disagree about
     the currently-configured file
 
-Read-only - no side effects. Invoked by ``bash llmstack.sh check``.
+Read-only -- no side effects. Invoked by ``llmstack check``.
 """
 
 from __future__ import annotations
@@ -21,15 +21,14 @@ from pathlib import Path
 import yaml
 from huggingface_hub import HfApi
 
-from tiers import LLMSTACK_DIR, load_tiers
-
-YAML_PATH = LLMSTACK_DIR / "llama-swap.yaml"
+from llmstack.paths import resolve
+from llmstack.tiers import load_tiers
 
 HF_RE = re.compile(r"-hf\s+(\S+/\S+)")
 HFF_RE = re.compile(r"-hff\s+(\S+\.gguf)")
 
 
-def parse_yaml(yaml_path: Path = YAML_PATH) -> dict[str, tuple[str, str]]:
+def parse_yaml(yaml_path: Path) -> dict[str, tuple[str, str]]:
     """Map tier-name -> (repo, file) by reading ``llama-swap.yaml``.
 
     Strips comment lines from each ``cmd:`` block before regex-matching so
@@ -64,10 +63,10 @@ def hf_meta(api: HfApi, repo: str, fname: str) -> tuple[str, str]:
         return "ERR", str(e)[:24]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     api = HfApi()
     tiers = load_tiers()
-    yaml_cfg = parse_yaml()
+    yaml_cfg = parse_yaml(resolve().llama_swap_yaml)
 
     fmt = "{:<18} {:<8} {:<70} {:>10} {:>12}  {}"
     print(fmt.format("tier", "label", "file", "size", "updated", "url"))
@@ -101,9 +100,9 @@ def main() -> int:
     print("  https://huggingface.co/unsloth          (Qwen + UD dynamic quants)")
     print("  https://huggingface.co/mradermacher     (i1 + abliterated/heretic)")
     print()
-    print("Then: see ./UPGRADING.md for the workflow.")
+    print("Then: see UPGRADING.md for the workflow.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
