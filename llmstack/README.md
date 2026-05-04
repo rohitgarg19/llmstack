@@ -64,8 +64,14 @@ opencode `agent.<name>.temperature` is set to match — clients can still overri
 ## opencode integration
 
 `bash llmstack.sh install` generates an opencode config at
-`llmstack/.run/opencode.json` (derived from `../models.ini`). Your global
-`~/.config/opencode/opencode.json` is **never modified** by this stack.
+`<work-dir>/.run/opencode.json` (derived from `../models.ini`), where
+`<work-dir>` is whatever directory you ran the script from. By default
+that's `llmstack/`, but you can `cd` into any project and invoke
+`bash /abs/path/to/llmstack/llmstack.sh install` to get a project-local
+config there. The script also copies `AGENTS.md` next to the generated
+JSON, so the `.run/` folder is a self-contained opencode bundle. Your
+global `~/.config/opencode/opencode.json` is **never modified** by this
+stack.
 
 opencode picks up our config because `bash llmstack.sh start` (and
 `bash llmstack.sh shell`) drop you into a subshell with these env vars
@@ -73,10 +79,15 @@ exported:
 
 | Env var | Value |
 |---|---|
-| `OPENCODE_CONFIG` | `llmstack/.run/opencode.json` (overrides global, sits below project configs) |
-| `LLMSTACK_CHANNEL` | `current` or `next` (whichever channel the daemons are running) |
+| `OPENCODE_CONFIG` | `<work-dir>/.run/opencode.json` (overrides global, sits below project configs) |
+| `LLMSTACK_CHANNEL` | `current`, `next`, or `external` (the latter when daemons were started from a different project's `.run/`) |
 | `LLMSTACK_ACTIVE` | `1` (used to refuse recursive entry) |
-| `LLMSTACK_ROOT` | absolute path to `llmstack/` |
+| `LLMSTACK_ROOT` | absolute path to `llmstack/` (the source dir) |
+
+The llama-swap and router daemons are singleton on ports 10101/10102 and
+**shared across projects**: `start` from a second project notices the
+running daemons and reuses them rather than fighting for the ports;
+`stop` from any project tears them down.
 
 The shell's prompt is prefixed with `[llmstack:<channel>]` so you always
 know whether you're in the env or not. Bash and zsh source your normal
@@ -101,7 +112,7 @@ a custom one. Slash-commands `/fast`, `/review`, `/nofilter` are also available.
 Want a second terminal into the same stack? `bash llmstack.sh shell`
 spawns another env-prepared subshell without touching the daemons.
 Want to run opencode without the subshell? `OPENCODE_CONFIG=$PWD/.run/opencode.json opencode`
-from `llmstack/`.
+from any directory you previously ran `install` in.
 
 ## Layout
 
@@ -117,6 +128,8 @@ llmstack/
 │                                Run `bash llmstack.sh help` for everything.
 ├── AGENTS.md                  House style + routing notes loaded into every
 │                                opencode session via the `instructions` field.
+│                                `install` copies this into <work-dir>/.run/
+│                                so the .run/ folder is self-contained.
 ├── llama-swap.yaml            AUTO-GENERATED runtime config from ../models.ini.
 │                                Hand edits get clobbered on the next install.
 ├── src/                       all Python lives here
@@ -132,12 +145,17 @@ llmstack/
 ├── bin/llama-swap             gitignored: downloaded by `llmstack.sh install-llama-swap`
 │                                (auto-detects OS/arch, fetches latest release)
 ├── .venv/                     Python deps (created from requirements.txt)
-├── logs/                      llama-swap.log, router.log, dl-*.log
-└── .run/                      runtime state (gitignored):
-                                opencode.json (consumed via OPENCODE_CONFIG),
-                                pid files, active-channel marker,
-                                llama-swap.next.yaml sidecar,
-                                llmstack.bashrc / zdotdir for prompt prefix
+└── .run/                      runtime state (gitignored). Default location is
+                                here when `llmstack.sh` is invoked from
+                                `llmstack/` itself; otherwise it lands at
+                                `$PWD/.run/` so each project gets its own:
+                                  opencode.json (consumed via OPENCODE_CONFIG),
+                                  AGENTS.md (copy of the template above),
+                                  logs/llama-swap.log, logs/router.log,
+                                  logs/dl-*.log,
+                                  pid files, active-channel marker,
+                                  llama-swap.next.yaml sidecar,
+                                  llmstack.bashrc / zdotdir for prompt prefix
 ```
 
 ## Quick start
@@ -149,10 +167,11 @@ The full first-time install is **stepwise** and does not auto-start the stack:
 
   1. download every GGUF named in `../models.ini`
   2. wait for downloads to finish
-  3. generate `llama-swap.yaml` and `.run/opencode.json` from `models.ini`
-     (the global `~/.config/opencode/opencode.json` is left untouched;
+  3. generate `llama-swap.yaml` and `<work-dir>/.run/opencode.json` from
+     `models.ini`, plus copy `AGENTS.md` into `<work-dir>/.run/`. The
+     global `~/.config/opencode/opencode.json` is left untouched;
      opencode picks up our copy via the `OPENCODE_CONFIG` env var that
-     `llmstack.sh start`/`shell` exports)
+     `llmstack.sh start`/`shell` exports.
 
 `bash llmstack.sh setup` orchestrates all three. Re-running it later is safe:
 downloads are idempotent (cached files skip), and configs are atomically

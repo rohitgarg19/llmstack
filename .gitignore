@@ -36,13 +36,17 @@ Thumbs.db
 *.swo
 
 # --- llmstack runtime state -------------------------------------------------
-# Logs (incl. dl-*.log GGUF download streams, llama-swap.log, router.log).
-# Regenerated on every run; can grow into the GBs.
-llmstack/logs/
+# Per-cwd .run/ directory, created wherever `llmstack.sh` is invoked.
+# Contains: opencode.json, AGENTS.md (copy of template), pid files,
+# active-channel marker, llama-swap.next.yaml sidecar, llmstack.bashrc /
+# zdotdir for prompt prefix, logs/llama-swap.log, logs/router.log,
+# logs/dl-*.log. All regenerated on demand.
+.run/
 
-# pid files, active-channel marker, sidecar yaml; managed by `llmstack.sh
-# start/stop`. Regenerated on every run.
-llmstack/.run/
+# Legacy log path (logs are now under .run/logs/). Kept here so old logs
+# left over from earlier versions of the script don't get accidentally
+# committed.
+llmstack/logs/
 
 # --- Vendored binary --------------------------------------------------------
 # Mach-O arm64 binary, ~14 MB. Re-download from:
@@ -50,14 +54,15 @@ llmstack/.run/
 llmstack/bin/llama-swap
 
 # --- Auto-generated configs -------------------------------------------------
-# Both derive from models.ini via:
+# Auto-generated from models.ini via:
 #   - llmstack/src/gen_llama_swap_yaml.py  -> llmstack/llama-swap.yaml
-#   - llmstack/src/gen_opencode_config.py  -> ~/.config/opencode/opencode.json
+#   - llmstack/src/gen_opencode_config.py  -> <work-dir>/.run/opencode.json
+# (the latter is covered by the .run/ rule above)
 # Regenerate with: bash llmstack/llmstack.sh install
 llmstack/llama-swap.yaml
 
 # Legacy: project-root opencode.json was a manual seed before the installer
-# existed. Real one now lives at ~/.config/opencode/opencode.json and is
+# existed. Real one now lives at <work-dir>/.run/opencode.json and is
 # rendered fresh by `llmstack.sh install`. Safe to delete from disk.
 /opencode.json
 
