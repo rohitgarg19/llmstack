@@ -9,7 +9,7 @@ target if defined) with:
   - DRIFT marker when ``models.ini`` and ``llama-swap.yaml`` disagree about
     the currently-configured file
 
-Read-only - no side effects. Invoked by ``scripts/check-models.sh``.
+Read-only - no side effects. Invoked by ``bash llmstack.sh check``.
 """
 
 from __future__ import annotations

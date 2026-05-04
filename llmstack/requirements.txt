@@ -17,5 +17,5 @@ huggingface_hub>=1.0,<2.0
 PyYAML>=6.0,<7.0
 hf_transfer>=0.1,<1.0              # accelerated GGUF downloads (HF_HUB_ENABLE_HF_TRANSFER=1)
 
-# --- src/gen_opencode_config.py + scripts/install.sh -----------------------
+# --- src/gen_opencode_config.py + `llmstack.sh install` -----------------------
 # stdlib only (configparser, json, pathlib, re) - no entries here.

@@ -5,14 +5,14 @@
 # Everything else under llmstack/ that's auto-generated, downloaded, or runtime
 # state is excluded from version control - it is reproducible from:
 #
-#   bash llmstack/scripts/setup.sh        # downloads + generates configs
-#   bash llmstack/scripts/install.sh      # generates configs only
+#   bash llmstack/llmstack.sh setup        # downloads + generates configs
+#   bash llmstack/llmstack.sh install      # generates configs only
 #
 # Tracked things you SHOULD see in `git status`:
 #   models.ini
 #   llmstack/README.md, UPGRADING.md, requirements.txt
 #   llmstack/src/*.py
-#   llmstack/scripts/*.sh
+#   llmstack/llmstack.sh   (single entry point for all stack actions)
 # ----------------------------------------------------------------------------
 
 # --- Python -----------------------------------------------------------------
@@ -40,7 +40,8 @@ Thumbs.db
 # Regenerated on every run; can grow into the GBs.
 llmstack/logs/
 
-# pid files for llama-swap + router; managed by start.sh / stop.sh.
+# pid files, active-channel marker, sidecar yaml; managed by `llmstack.sh
+# start/stop`. Regenerated on every run.
 llmstack/.run/
 
 # --- Vendored binary --------------------------------------------------------
@@ -52,18 +53,15 @@ llmstack/bin/llama-swap
 # Both derive from models.ini via:
 #   - llmstack/src/gen_llama_swap_yaml.py  -> llmstack/llama-swap.yaml
 #   - llmstack/src/gen_opencode_config.py  -> ~/.config/opencode/opencode.json
-# Regenerate with: bash llmstack/scripts/install.sh
+# Regenerate with: bash llmstack/llmstack.sh install
 llmstack/llama-swap.yaml
 
 # Legacy: project-root opencode.json was a manual seed before the installer
 # existed. Real one now lives at ~/.config/opencode/opencode.json and is
-# rendered fresh by install.sh. Safe to delete from disk.
+# rendered fresh by `llmstack.sh install`. Safe to delete from disk.
 /opencode.json
 
 # --- Install-time artefacts -------------------------------------------------
-# Timestamped backups written by install.sh before each replace.
-*.bak.*
-
 # In-flight temp files from mktemp (cleaned up by trap RETURN, but may
 # linger if the script is killed mid-render).
 .opencode.json.*

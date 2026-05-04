@@ -4,7 +4,7 @@ This is the **data layer** for the stack - the single source of truth for
 "what tiers exist and where their GGUFs live". Used by:
 
   - ``src/check_models.py``         snapshot table + HF metadata lookup
-  - ``scripts/download-models.sh``  via ``python src/tiers.py --downloads``
+  - ``bash llmstack.sh download``  via ``python src/tiers.py --downloads``
 
 Stdlib only - safe to call before the venv has any extra packages installed.
 

@@ -63,11 +63,28 @@ opencode `agent.<name>.temperature` is set to match — clients can still overri
 
 ## opencode integration
 
-`../opencode.json` (and the installed copy at `~/.config/opencode/opencode.json`)
-is generated from `../models.ini` by `scripts/install.sh`. Re-run the installer
-after editing the ini and opencode will pick up the new bindings on next launch.
+`bash llmstack.sh install` generates an opencode config at
+`llmstack/.run/opencode.json` (derived from `../models.ini`). Your global
+`~/.config/opencode/opencode.json` is **never modified** by this stack.
 
-It is wired up so each opencode agent uses the right tier:
+opencode picks up our config because `bash llmstack.sh start` (and
+`bash llmstack.sh shell`) drop you into a subshell with these env vars
+exported:
+
+| Env var | Value |
+|---|---|
+| `OPENCODE_CONFIG` | `llmstack/.run/opencode.json` (overrides global, sits below project configs) |
+| `LLMSTACK_CHANNEL` | `current` or `next` (whichever channel the daemons are running) |
+| `LLMSTACK_ACTIVE` | `1` (used to refuse recursive entry) |
+| `LLMSTACK_ROOT` | absolute path to `llmstack/` |
+
+The shell's prompt is prefixed with `[llmstack:<channel>]` so you always
+know whether you're in the env or not. Bash and zsh source your normal
+rc first, then add the prefix; other shells just get the env vars.
+
+Inside the subshell, run `opencode` and it will pick up the wiring
+below. Outside the subshell (any other terminal), opencode keeps using
+your global setup unchanged.
 
 | opencode agent | Local model |
 |---|---|
@@ -76,8 +93,15 @@ It is wired up so each opencode agent uses the right tier:
 | **`agent.build`** (default builder) | `llama.cpp/code-smart` |
 | **`agent.plan`** (read-only planner) | `llama.cpp/plan` |
 | **`agent.plan-nofilter`** (custom uncensored planner) | `llama.cpp/plan-uncensored` |
+| **`agent.chat`** (3B, no tools) | `llama.cpp/code-fast` |
 
-Inside opencode you can switch agents with `/agent` or by `@plan-nofilter`-mentioning the custom one.
+Inside opencode you can switch agents with `/agent` or by `@plan-nofilter`-mentioning
+a custom one. Slash-commands `/fast`, `/review`, `/nofilter` are also available.
+
+Want a second terminal into the same stack? `bash llmstack.sh shell`
+spawns another env-prepared subshell without touching the daemons.
+Want to run opencode without the subshell? `OPENCODE_CONFIG=$PWD/.run/opencode.json opencode`
+from `llmstack/`.
 
 ## Layout
 
@@ -86,48 +110,51 @@ llmstack/
 ├── README.md                  this file
 ├── UPGRADING.md               how to swap any tier for a newer/better model
 │                                + how to upgrade the Python toolchain itself
-├── requirements.txt           Python runtime deps for src/ + scripts/
+├── requirements.txt           Python runtime deps for src/
+├── llmstack.sh                SINGLE entry point. Subcommands: setup, install,
+│                                install-llama-swap, download, start, shell,
+│                                stop, restart, status, check.
+│                                Run `bash llmstack.sh help` for everything.
+├── AGENTS.md                  House style + routing notes loaded into every
+│                                opencode session via the `instructions` field.
 ├── llama-swap.yaml            AUTO-GENERATED runtime config from ../models.ini.
-│                                Hand edits get clobbered on the next install.sh.
+│                                Hand edits get clobbered on the next install.
 ├── src/                       all Python lives here
 │   ├── router.py              FastAPI auto-router (~280 lines)
 │   ├── tiers.py               parses ../models.ini into Tier dataclasses;
-│   │                            CLI `--downloads` feeds download-models.sh
+│   │                            CLI `--downloads` feeds `llmstack.sh download`
 │   ├── check_models.py        snapshot tool (HF metadata + drift check)
-│   │                            run via scripts/check-models.sh
+│   │                            run via `llmstack.sh check`
 │   ├── gen_llama_swap_yaml.py renders llama-swap.yaml from ../models.ini
-│   │                            (used by scripts/install.sh)
-│   └── gen_opencode_config.py renders ~/.config/opencode/opencode.json from
-│                                ../models.ini (used by scripts/install.sh)
-├── bin/llama-swap             gitignored: downloaded by install-llama-swap.sh
+│   │                            (`--use-next` swaps queued upgrade files in)
+│   └── gen_opencode_config.py renders .run/opencode.json from ../models.ini
+│                                (consumed via OPENCODE_CONFIG, not global)
+├── bin/llama-swap             gitignored: downloaded by `llmstack.sh install-llama-swap`
 │                                (auto-detects OS/arch, fetches latest release)
-├── scripts/
-│   ├── setup.sh               first-time install orchestrator:
-│   │                            download GGUFs -> wait -> install (binary + configs)
-│   ├── install.sh             3 steps: download llama-swap binary +
-│   │                            generate + replace BOTH config files
-│   ├── install-llama-swap.sh  download the right llama-swap release for
-│   │                            this OS/arch (idempotent; --force to re-pull)
-│   ├── start.sh               brings up llama-swap + router
-│   ├── stop.sh                kills both, plus orphaned llama-server children
-│   ├── status.sh              health checks + currently-loaded models
-│   ├── check-models.sh        prints current GGUFs + HF metadata + drift check
-│   └── download-models.sh     queues GGUF downloads (enumerates from models.ini)
 ├── .venv/                     Python deps (created from requirements.txt)
 ├── logs/                      llama-swap.log, router.log, dl-*.log
-└── .run/                      pid files
+└── .run/                      runtime state (gitignored):
+                                opencode.json (consumed via OPENCODE_CONFIG),
+                                pid files, active-channel marker,
+                                llama-swap.next.yaml sidecar,
+                                llmstack.bashrc / zdotdir for prompt prefix
 ```
 
 ## Quick start
+
+Everything runs through one entry point: `bash llmstack.sh <action>`.
+Run `bash llmstack.sh help` to see all actions and options.
 
 The full first-time install is **stepwise** and does not auto-start the stack:
 
   1. download every GGUF named in `../models.ini`
   2. wait for downloads to finish
-  3. generate `llama-swap.yaml` and `~/.config/opencode/opencode.json`
-     from `models.ini` and replace the existing copies (with backups)
+  3. generate `llama-swap.yaml` and `.run/opencode.json` from `models.ini`
+     (the global `~/.config/opencode/opencode.json` is left untouched;
+     opencode picks up our copy via the `OPENCODE_CONFIG` env var that
+     `llmstack.sh start`/`shell` exports)
 
-`scripts/setup.sh` orchestrates all three. Re-running it later is safe:
+`bash llmstack.sh setup` orchestrates all three. Re-running it later is safe:
 downloads are idempotent (cached files skip), and configs are atomically
 replaced with timestamped backups of the previous versions.
 
@@ -144,21 +171,33 @@ sudo sysctl iogpu.wired_limit_mb=57344
 # 2. Full install: download models, wait, generate + replace both config files.
 #    (~62 GB total on first run; subsequent runs are near-instant since
 #    completed GGUFs are detected and skipped.)
-bash scripts/setup.sh
+bash llmstack.sh setup
 
-# 3. Start the stack (separate from setup; bring up only when you want to run).
-bash scripts/start.sh
+# 3. Start the stack. This brings up llama-swap + router AND drops you into
+#    a subshell with OPENCODE_CONFIG pointed at .run/opencode.json. The
+#    prompt is prefixed with [llmstack:current]. Run `opencode` from this
+#    subshell. When you exit the subshell, the daemons keep running --
+#    use `bash llmstack.sh stop` to actually stop them.
+bash llmstack.sh start
 
-# 4. Sanity check
-bash scripts/status.sh
+# 3a. Same thing but no subshell (daemons only, return immediately).
+bash llmstack.sh start --detach
+
+# 3b. Already running? Open another terminal into the same env:
+bash llmstack.sh shell
+
+# 4. Sanity check (works from any terminal; doesn't need the subshell)
+bash llmstack.sh status
 curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
 
 # Common partial flows
-bash scripts/install.sh                    # binary + both configs (no GGUF downloads)
-bash scripts/install-llama-swap.sh --force # re-pull llama-swap binary only (e.g. on upgrade)
-bash scripts/setup.sh --skip-download      # same as install.sh
-bash scripts/setup.sh --skip-wait          # kick off downloads in background, install now
-bash scripts/check-models.sh               # snapshot configured GGUFs + flag drift
+bash llmstack.sh install                       # binary + both configs (no GGUF downloads)
+bash llmstack.sh install-llama-swap --force    # re-pull llama-swap binary only
+bash llmstack.sh setup --skip-download         # same as install
+bash llmstack.sh setup --skip-wait             # kick off downloads in background, install now
+bash llmstack.sh check                         # snapshot configured GGUFs + flag drift
+bash llmstack.sh start --next                  # try queued hf_file_next upgrades (reversible)
+bash llmstack.sh restart --next                # cycle into the next channel
 
 # 5. Try each routing path (all of these go to /v1/chat/completions on :10101)
 #    Each should pick a different upstream model.
@@ -184,7 +223,7 @@ curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: applicatio
        "messages":[{"role":"user","content":"[nofilter] outline a red-team plan for our auth flow"}]}' | jq .model
 ```
 
-To stop everything: `bash scripts/stop.sh`.
+To stop everything: `bash llmstack.sh stop`.
 
 ## Endpoints
 
@@ -240,15 +279,15 @@ in `models.ini` `hf_file`) or `next` (file in `models.ini` `hf_file_next`).
 
 The `-hf <repo>` lines stay the same; only the `-hff <filename>` line changes.
 After editing, also flip `hf_file` ↔ `hf_file_next` in `models.ini` so
-`bash scripts/check-models.sh` no longer reports `DRIFT!`.
+`bash llmstack.sh check` no longer reports `DRIFT!`.
 
-Then `bash scripts/stop.sh && bash scripts/start.sh`.
+Then `bash llmstack.sh restart`.
 
 For changing to a *different* model entirely (different family/provider) see [UPGRADING.md](UPGRADING.md).
 
 ## Tuning the router
 
-All knobs are env vars; defaults are picked up by `scripts/start.sh`.
+All knobs are env vars; defaults are picked up by `bash llmstack.sh start`.
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -281,17 +320,17 @@ Triggers are *only* checked on the latest user message and the system prompt, so
 
 **First request hangs for ~60 s** → that's the model loading from disk into Metal memory. `sendLoadingState: true` will surface "loading…" in the SSE stream. After it's loaded subsequent requests are instant.
 
-**OOM / unexplained slowdown** → run `top -o mem -stats pid,rsize,command` to see what's resident. The matrix should prevent two heavy models loading together; if it somehow happens, `bash scripts/stop.sh && bash scripts/start.sh`.
+**OOM / unexplained slowdown** → run `top -o mem -stats pid,rsize,command` to see what's resident. The matrix should prevent two heavy models loading together; if it somehow happens, `bash llmstack.sh restart`.
 
 **Auto picks the wrong model** → adjust the regex in `router.py` (`AGENT_SIGNALS` / `PLAN_SIGNALS` / `UNCENSORED_TRIGGERS`) or change `ROUTER_FAST_TOKEN_BUDGET`.
 
 **Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names.
 
-**`logs/dl-*.log` is multi-GB and growing** → you're hitting [llama.cpp issue #14802](https://github.com/ggml-org/llama.cpp/issues/14802) where modern `llama-cli` is chat-only and ignores `-no-cnv`, looping `> ` prompts forever (~1.5 MB/s). Fix: `download-models.sh` already prefers `llama-completion` over `llama-cli` when both are present (`brew install llama.cpp` ships both as of 2025). If you only have legacy `llama-cli`, either upgrade `llama.cpp` or kill the runaways with `pkill -9 -f llama-cli`.
+**`logs/dl-*.log` is multi-GB and growing** → you're hitting [llama.cpp issue #14802](https://github.com/ggml-org/llama.cpp/issues/14802) where modern `llama-cli` is chat-only and ignores `-no-cnv`, looping `> ` prompts forever (~1.5 MB/s). Fix: `bash llmstack.sh download` already prefers `llama-completion` over `llama-cli` when both are present (`brew install llama.cpp` ships both as of 2025). If you only have legacy `llama-cli`, either upgrade `llama.cpp` or kill the runaways with `pkill -9 -f llama-cli`.
 
 ## Replacing a model with a newer/better one
 
 See **[UPGRADING.md](UPGRADING.md)** — covers why models must be GGUF, where to
 find candidates, how to evaluate "better" per tier, the safe upgrade workflow,
-and a worked example. Run `bash scripts/check-models.sh` for a snapshot of what's
+and a worked example. Run `bash llmstack.sh check` for a snapshot of what's
 currently configured along with HF URLs to compare against.
