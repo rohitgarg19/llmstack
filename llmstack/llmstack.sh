@@ -12,15 +12,16 @@
 #
 # Actions:
 #   setup [--skip-download] [--skip-wait]
-#       First-time install: download every GGUF in models.ini, wait for them
-#       to finish, then generate + install both config files. Does NOT start
-#       the stack.
-#   install [--print]
-#       Generate llama-swap.yaml + .llmstack/opencode.json from models.ini, and
-#       ensure bin/llama-swap is up to date. --print writes both configs to
-#       stdout instead of installing them.
-#   install-llama-swap [--force]
-#       Just (re)download the llama-swap binary for this OS/arch.
+#       First-time walkthrough: kick off GGUF downloads, wait for them,
+#       then print the shell activation hook (eval line for ~/.zshrc) and
+#       check that opencode is installed. Does NOT run install or start the
+#       stack -- those are separate steps once downloads finish.
+#   install [--print] [--current | --next]
+#       Regenerate llama-swap.yaml + .llmstack/opencode.json from models.ini.
+#       Does NOT download or update the llama-swap binary -- use
+#       Does NOT download or update the llama-swap binary (setup does that).
+#       Passively checks if a newer llama-swap release is available and prints
+#       a hint if so. --print writes both configs to stdout instead of files.
 #   download
 #       Download every GGUF named in models.ini (current + queued next) to
 #       the standard llama.cpp cache, in parallel, in the background.
@@ -67,6 +68,8 @@
 #   bash llmstack.sh status                  # what's up
 #
 # Environment overrides:
+#   LLMSTACK_MODELS_INI     path to models.ini (default: <repo-root>/models.ini)
+#                           supply an external file to manage configs outside the repo
 #   OPENCODE_CONFIG_DIR     where to write opencode.json (default: .llmstack/)
 #   LLAMA_SWAP_VERSION      pin a specific llama-swap release (e.g. v211)
 #   HF_TOKEN                authenticate model downloads (faster rate limits)
@@ -103,7 +106,7 @@ GEN_JSON="$SRC_DIR/gen_opencode_config.py"
 ROUTER="$SRC_DIR/router.py"
 TIERS="$SRC_DIR/tiers.py"
 CHECK_MODELS="$SRC_DIR/check_models.py"
-INI="$PROJ/models.ini"
+INI="${LLMSTACK_MODELS_INI:-$PROJ/models.ini}"
 
 AGENTS_TEMPLATE="$ROOT/AGENTS.md"
 DEFAULT_CONFIG="$ROOT/llama-swap.yaml"
@@ -179,15 +182,16 @@ cmd_help() {
     ' "$0"
 }
 
-# --- action: install-llama-swap --------------------------------------------
+# --- helper: download / update llama-swap binary ---------------------------
+# Called by setup. Not a public subcommand.
 
-cmd_install_llama_swap() {
+_install_llama_swap() {
     local force=0
     for arg in "$@"; do
         case "$arg" in
             --force|-f) force=1 ;;
             -h|--help) cmd_help; return 0 ;;
-            *) die "unknown arg to install-llama-swap: $arg (try --force, -h)" ;;
+            *) die "unknown arg to _install_llama_swap: $arg" ;;
         esac
     done
 
@@ -291,10 +295,10 @@ cmd_install() {
     local default_channel="current"
     for arg in "$@"; do
         case "$arg" in
-            --print|-n)        print_only=1 ;;
-            --next)            default_channel="next" ;;
-            --current)         default_channel="current" ;;
-            -h|--help)         cmd_help; return 0 ;;
+            --print|-n)   print_only=1        ;;
+            --next)       default_channel="next"    ;;
+            --current)    default_channel="current" ;;
+            -h|--help)    cmd_help; return 0  ;;
             *) die "unknown arg to install: $arg (try --print, --current, --next, -h)" ;;
         esac
     done
@@ -308,68 +312,68 @@ cmd_install() {
         return 0
     fi
 
-    echo "[1/3] llama-swap binary"
-    cmd_install_llama_swap
-    echo
-
-    echo "[2/3] llama-swap.yaml"
+    echo "[1/2] llama-swap.yaml"
     _render_install "llama-swap.yaml" "$GEN_YAML" "$ROOT/llama-swap.yaml" \
         "import yaml,sys; yaml.safe_load(open(sys.argv[1]))"
     echo
 
-    echo "[3/3] opencode.json + AGENTS.md"
-    # Copy the AGENTS.md template into .llmstack/ first so the generated
-    # opencode.json can reference it by absolute path. Keeping AGENTS.md
-    # alongside opencode.json makes the .llmstack/ folder self-contained --
-    # users can hand-edit .llmstack/AGENTS.md for one-off, project-specific
-    # instructions without polluting the source-of-truth template.
+    echo "[2/2] opencode.json + AGENTS.md"
     if [[ -f "$AGENTS_TEMPLATE" ]]; then
         cp "$AGENTS_TEMPLATE" "$AGENTS_LOCAL"
         chmod 644 "$AGENTS_LOCAL"
-        echo "[OK] copied $AGENTS_TEMPLATE"
-        echo "         -> $AGENTS_LOCAL"
+        echo "[OK] copied AGENTS.md -> $AGENTS_LOCAL"
     else
         echo "[!] AGENTS.md template not found at $AGENTS_TEMPLATE; skipping copy"
     fi
-
-    # Point the generator at the .llmstack/ copy of AGENTS.md (absolute path)
-    # so opencode loads it regardless of where the user invokes from.
     OPENCODE_INSTRUCTIONS="$AGENTS_LOCAL" \
     _render_install "opencode.json" "$GEN_JSON" "$OPENCODE_JSON" \
         "import json,sys; json.load(open(sys.argv[1]))"
 
-    # Persist the channel choice so a bare `bash llmstack.sh start` later on
-    # picks it up automatically. `start --current/--next` still overrides at
-    # runtime; install just sets the default.
     echo "$default_channel" > "$DEFAULT_MARKER"
-    echo "[OK] default channel pinned to '$default_channel' (in $DEFAULT_MARKER)"
+    echo "[OK] default channel: $default_channel"
+
+    # Passive version check — report if llama-swap can be updated, but don't
+    # download anything. Run `llmstack setup` to update the binary.
+    echo
+    echo "[*] checking llama-swap version..."
+    if [[ -x "$LLAMA_SWAP" ]]; then
+        local installed latest
+        installed="$("$LLAMA_SWAP" --version 2>/dev/null | head -1 || true)"
+        latest="$(curl -fsSL --max-time 5 \
+            "https://api.github.com/repos/$REPO_LLAMA_SWAP/releases/latest" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])" \
+            2>/dev/null || true)"
+        if [[ -n "$installed" ]]; then
+            echo "    installed: $installed"
+        fi
+        if [[ -n "$latest" ]]; then
+            local installed_num latest_num
+            installed_num="$(echo "$installed" | grep -oE 'v?[0-9]+' | head -1 | tr -d v)"
+            latest_num="${latest#v}"
+            if [[ "$installed_num" == "$latest_num" ]]; then
+                echo "    latest:    $latest  [up to date]"
+            else
+                echo "    latest:    $latest  [update available -> run: llmstack setup to update]"
+            fi
+        else
+            echo "    (could not reach GitHub to check for updates)"
+        fi
+    else
+        echo "    llama-swap not installed yet -- run: llmstack setup"
+    fi
 
     cat <<EOF
 
-[OK] both configs derived from $INI.
+[OK] configs generated from $INI.
      re-run any time you edit models.ini.
 
-opencode wiring:
-  config:        $OPENCODE_JSON
-  instructions:  $AGENTS_LOCAL
-  default chan:  $default_channel  (pinned by this install; override with start --next/--current)
-  Picked up via OPENCODE_CONFIG; either via the subshell spawned by
-    bash llmstack.sh start
-    bash llmstack.sh shell
-  or automatically via the activate hook (one-time setup):
-    eval "\$(bash $0 activate zsh)"   # add to ~/.zshrc
-    eval "\$(bash $0 activate bash)"  # add to ~/.bashrc
-  Your ~/.config/opencode/opencode.json is intentionally NOT modified.
-
-Per-project layout:
-  Everything above lives under \$PWD/.llmstack/, so invoking llmstack.sh from
-  a different project gives you a separate opencode config there.
-  Daemons are singleton (one set at a time, on ports 10101/10102).
-  Only one channel runs at any moment.
+  config:       $OPENCODE_JSON
+  instructions: $AGENTS_LOCAL
+  channel:      $default_channel
 
 Next:
-  bash llmstack.sh start            # bring up the pinned channel + drop into shell
-  bash llmstack.sh check            # snapshot configured GGUFs + drift check
+  llmstack start     # bring up the stack + enter the shell
+  llmstack check     # snapshot configured GGUFs + drift check
 EOF
 }
 
@@ -488,18 +492,55 @@ cmd_setup() {
         echo
     fi
 
-    echo "[3/3] generating + installing configs..."
-    cmd_install
+    local user_shell="${LLMSTACK_SHELL:-${SHELL:-zsh}}"
+    local shell_name
+    shell_name="$(basename "$user_shell")"
+
+    echo "[3/3] installing llama-swap binary..."
+    _install_llama_swap
+    echo
+
+    echo "[4/4] wiring shell activation hook..."
+    echo
+    echo "Add the following line to your ~/${shell_name}rc to auto-activate"
+    echo "llmstack whenever you cd into a project with .llmstack/:"
+    echo
+    echo "    eval \"\$(bash $0 activate $shell_name)\""
+    echo
+    cmd_activate "$shell_name"
+
+    echo
+    echo "[5/5] checking opencode..."
+    if command -v opencode >/dev/null 2>&1; then
+        echo "[OK] opencode found: $(command -v opencode)"
+        echo "     version: $(opencode --version 2>/dev/null || echo '(unknown)')"
+    else
+        cat <<'EOF'
+[!] opencode not found in PATH.
+
+Install it with:
+  curl -fsSL https://opencode.ai/install | sh
+  # or via npm:
+  npm install -g opencode-ai
+
+After installing, run:
+  llmstack install     # generate configs for this project
+  llmstack start       # bring up the stack
+EOF
+        return 0
+    fi
 
     cat <<EOF
 
 [OK] setup complete.
 
-To start the stack:
-  bash llmstack.sh start
+Next steps:
+  1. Add the eval line above to your ~/${shell_name}rc (one time)
+  2. llmstack install     # generate .llmstack/ configs for this project
+  3. llmstack start       # bring up the stack + enter the shell
 
-To check what's configured + drift between models.ini and llama-swap.yaml:
-  bash llmstack.sh check
+To check configured GGUFs + drift vs models.ini:
+  llmstack check
 EOF
 }
 
@@ -712,6 +753,10 @@ _spawn_shell() {
 EOF
 
     local -a exec_argv=()
+    # Colour palette: current=steel-blue (38), next=orange (208) — ANSI 256-colour.
+    local color_code
+    color_code=$([[ "$channel" == "next" ]] && echo 208 || echo 38)
+
     case "$shell_name" in
         bash)
             local rcfile="$LLMSTACK_DIR/llmstack.bashrc"
@@ -719,7 +764,7 @@ EOF
 # AUTO-GENERATED by llmstack.sh; sourced by the spawned subshell.
 [ -f "\$HOME/.bashrc" ] && source "\$HOME/.bashrc"
 alias llmstack='bash "$0"'
-PS1="[llmstack:$channel] \${PS1:-\\\$ }"
+PS1="\[\033[38;5;${color_code}m\][llmstack:$channel]\[\033[0m\] \${PS1:-\\\$ }"
 RC
             exec_argv=("$user_shell" --rcfile "$rcfile" -i)
             ;;
@@ -730,7 +775,7 @@ RC
 # AUTO-GENERATED by llmstack.sh; sourced by the spawned subshell.
 [ -f "\$HOME/.zshrc" ] && source "\$HOME/.zshrc"
 alias llmstack='bash "$0"'
-PROMPT="[llmstack:$channel] \${PROMPT:-%# }"
+PROMPT="%F{${color_code}}[llmstack:$channel]%f \${PROMPT:-%# }"
 RC
             exec_argv=(env "ZDOTDIR=$zdotdir" "$user_shell" -i)
             ;;
@@ -979,7 +1024,9 @@ _llmstack_activate() {
             : "${_LLMSTACK_PS1_BACKUP:=$PROMPT}"
             export _LLMSTACK_PS1_BACKUP
             local label="${found:t}"
-            PROMPT="%F{magenta}[llmstack:${label}]%f $_LLMSTACK_PS1_BACKUP"
+            local color
+            color=$([[ "${LLMSTACK_CHANNEL:-current}" == "next" ]] && echo 208 || echo 38)
+            PROMPT="%F{${color}}[llmstack:${label}]%f $_LLMSTACK_PS1_BACKUP"
         fi
     else
         # leaving any project
@@ -1037,9 +1084,10 @@ _llmstack_activate() {
             fi
             : "${_LLMSTACK_PS1_BACKUP:=$PS1}"
             export _LLMSTACK_PS1_BACKUP
-            local label
+            local label color
             label="$(basename "$found")"
-            PS1="\[\033[35m\][llmstack:${label}]\[\033[0m\] $_LLMSTACK_PS1_BACKUP"
+            color=$([[ "${LLMSTACK_CHANNEL:-current}" == "next" ]] && echo 208 || echo 38)
+            PS1="\[\033[38;5;${color}m\][llmstack:${label}]\[\033[0m\] $_LLMSTACK_PS1_BACKUP"
         fi
     else
         if [[ -n "${LLMSTACK_PROJECT:-}" ]]; then
@@ -1072,7 +1120,6 @@ case "$action" in
     help|-h|--help)        cmd_help                       ;;
     setup)                 cmd_setup              "$@"    ;;
     install)               cmd_install            "$@"    ;;
-    install-llama-swap)    cmd_install_llama_swap "$@"    ;;
     download|download-models) cmd_download        "$@"    ;;
     start)                 cmd_start              "$@"    ;;
     shell)                 cmd_shell              "$@"    ;;

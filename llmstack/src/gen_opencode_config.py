@@ -25,7 +25,9 @@ from pathlib import Path
 HERE         = Path(__file__).resolve().parent   # llmstack/src/
 LLMSTACK_DIR = HERE.parent                       # llmstack/
 PROJECT_ROOT = LLMSTACK_DIR.parent               # ../
-INI_PATH     = PROJECT_ROOT / "models.ini"
+
+_default_ini = PROJECT_ROOT / "models.ini"
+INI_PATH = Path(os.environ["LLMSTACK_MODELS_INI"]) if "LLMSTACK_MODELS_INI" in os.environ else _default_ini
 
 PROVIDER_KEY = "llama.cpp"
 API_KEY      = "sk-no-key-required"
