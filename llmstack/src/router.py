@@ -325,16 +325,13 @@ async def passthrough(path: str, req: Request) -> Response:
 
 
 if __name__ == "__main__":
-    # Two bindings:
-    #   - TCP at ROUTER_HOST:ROUTER_PORT  -> for opencode (HTTP client over fetch)
-    #   - UDS at ROUTER_UDS               -> for power-user tooling, e.g.:
-    #         curl --unix-socket .llmstack/router.sock http://x/v1/models
-    #     opencode can't dial Unix sockets, so TCP is still the primary
-    #     interface; UDS is a side door that's per-project-isolated by path.
+    # TCP only: opencode (and any other HTTP client) dials ROUTER_HOST:ROUTER_PORT.
+    # Note: llama-swap (upstream) only accepts TCP via --listen ip:port and does
+    # not support Unix domain sockets, so UDS is not viable at that layer either.
     #
-    # uvicorn's CLI flags are mutually exclusive (one process == one bind),
-    # so we run two Server instances over the same FastAPI app on a single
-    # asyncio loop. If ROUTER_UDS is unset/empty, only TCP is bound.
+    # We pass the app object directly (not the "router:app" string) so uvicorn
+    # does not need to import by module name, meaning the script can be launched
+    # from any working directory without a prior `cd src/`.
     import asyncio
 
     import uvicorn
@@ -342,24 +339,6 @@ if __name__ == "__main__":
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     host = os.getenv("ROUTER_HOST", "127.0.0.1")
     port = int(os.getenv("ROUTER_PORT", "10101"))
-    uds_path = os.getenv("ROUTER_UDS", "").strip()
 
-    async def _serve() -> None:
-        servers = []
-
-        tcp_cfg = uvicorn.Config("router:app", host=host, port=port, log_level=log_level)
-        servers.append(uvicorn.Server(tcp_cfg))
-
-        if uds_path:
-            # remove stale socket file from a crashed previous run
-            try:
-                if os.path.exists(uds_path):
-                    os.unlink(uds_path)
-            except OSError as e:
-                log.warning("could not remove stale UDS at %s: %s", uds_path, e)
-            uds_cfg = uvicorn.Config("router:app", uds=uds_path, log_level=log_level)
-            servers.append(uvicorn.Server(uds_cfg))
-
-        await asyncio.gather(*(s.serve() for s in servers))
-
-    asyncio.run(_serve())
+    cfg = uvicorn.Config(app, host=host, port=port, log_level=log_level)
+    asyncio.run(uvicorn.Server(cfg).serve())
