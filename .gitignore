@@ -1,0 +1,70 @@
+# ----------------------------------------------------------------------------
+# .gitignore for opencode/ (llmstack)
+#
+# Single source of truth = ./models.ini.
+# Everything else under llmstack/ that's auto-generated, downloaded, or runtime
+# state is excluded from version control - it is reproducible from:
+#
+#   bash llmstack/scripts/setup.sh        # downloads + generates configs
+#   bash llmstack/scripts/install.sh      # generates configs only
+#
+# Tracked things you SHOULD see in `git status`:
+#   models.ini
+#   llmstack/README.md, UPGRADING.md, requirements.txt
+#   llmstack/src/*.py
+#   llmstack/scripts/*.sh
+# ----------------------------------------------------------------------------
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- OS / IDE ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- llmstack runtime state -------------------------------------------------
+# Logs (incl. dl-*.log GGUF download streams, llama-swap.log, router.log).
+# Regenerated on every run; can grow into the GBs.
+llmstack/logs/
+
+# pid files for llama-swap + router; managed by start.sh / stop.sh.
+llmstack/.run/
+
+# --- Vendored binary --------------------------------------------------------
+# Mach-O arm64 binary, ~14 MB. Re-download from:
+#   https://github.com/mostlygeek/llama-swap/releases
+llmstack/bin/llama-swap
+
+# --- Auto-generated configs -------------------------------------------------
+# Both derive from models.ini via:
+#   - llmstack/src/gen_llama_swap_yaml.py  -> llmstack/llama-swap.yaml
+#   - llmstack/src/gen_opencode_config.py  -> ~/.config/opencode/opencode.json
+# Regenerate with: bash llmstack/scripts/install.sh
+llmstack/llama-swap.yaml
+
+# Legacy: project-root opencode.json was a manual seed before the installer
+# existed. Real one now lives at ~/.config/opencode/opencode.json and is
+# rendered fresh by install.sh. Safe to delete from disk.
+/opencode.json
+
+# --- Install-time artefacts -------------------------------------------------
+# Timestamped backups written by install.sh before each replace.
+*.bak.*
+
+# In-flight temp files from mktemp (cleaned up by trap RETURN, but may
+# linger if the script is killed mid-render).
+.opencode.json.*
+.llama-swap.yaml.*
