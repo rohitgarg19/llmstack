@@ -27,16 +27,30 @@ Routing decision tree (first match wins):
   1. Explicit "uncensored" trigger in the last user message
      (e.g. starts with ``[nofilter]``, ``uncensored:``, or contains
      ``[uncensored]``)                                   -> plan-uncensored
-  2. Tools array non-empty (agent / function-calling)    -> code-smart
-  3. >= MULTI_TURN_THRESHOLD turns (agent loop)          -> code-smart
-  4. Estimated input tokens > FAST_TOKEN_BUDGET          -> code-smart
-  5. Code blocks (triple-backticks) or AGENT signal words -> code-smart
+  2. Explicit "ultra" trigger (``[ultra]``, ``[opus]``,
+     ``ultra:``, ``opus:``) AND ultra tier configured    -> code-ultra
+  3. Tools array non-empty (agent / function-calling)    -> code-smart
+  4. >= MULTI_TURN_THRESHOLD turns (agent loop)          -> code-smart
+  5. Estimated input tokens > ULTRA_TOKEN_BUDGET AND
+     ultra tier configured                               -> code-ultra
+  6. Estimated input tokens > FAST_TOKEN_BUDGET          -> code-smart
+  7. Code blocks (triple-backticks) or AGENT signal words -> code-smart
      (``implement``, ``fix bug``, ``write a function``,
      ``refactor``, ``debug``, ...)
-  6. PLAN signal words                                   -> plan
+  8. PLAN signal words                                   -> plan
      (``design``, ``architect``, ``approach``,
      ``trade-off``, ``should we``, ...)
-  7. default                                             -> code-fast
+  9. default                                             -> code-fast
+
+Ultra-tier routing is gated on availability: every escalation to
+``code-ultra`` first checks that the tier is loaded from
+``models.ini`` (i.e. present in :data:`TIER_BY_ALIAS`). When it
+isn't, the router silently falls back to the same target the rule
+would have picked without ultra (``code-smart`` for the trigger
+path, ``code-smart`` for the token-budget path) -- otherwise
+rewriting ``model`` to a tier name that isn't wired up surfaces as
+a 404 from llama-swap or a tier-not-found error from the bedrock
+dispatcher, which is just a confusing way to fail.
 
 Run with::
 
@@ -63,16 +77,27 @@ UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
 
 FAST_MODEL = os.getenv("ROUTER_FAST_MODEL", "code-fast")
 AGENT_MODEL = os.getenv("ROUTER_AGENT_MODEL", "code-smart")
+ULTRA_MODEL = os.getenv("ROUTER_ULTRA_MODEL", "code-ultra")
 PLAN_MODEL = os.getenv("ROUTER_PLAN_MODEL", "plan")
 UNCENSORED_MODEL = os.getenv("ROUTER_UNCENSORED_MODEL", "plan-uncensored")
 
 FAST_TOKEN_BUDGET = int(os.getenv("ROUTER_FAST_TOKEN_BUDGET", "4000"))
+# Token estimate above which auto-routing escalates from code-smart to
+# code-ultra (only when ultra is configured). Default 32k -- roughly
+# half of the local 65k-ctx ceiling, where local-coder quality starts
+# degrading on long-context refactors. Tune via ROUTER_ULTRA_TOKEN_BUDGET.
+ULTRA_TOKEN_BUDGET = int(os.getenv("ROUTER_ULTRA_TOKEN_BUDGET", "32000"))
 MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "6"))
 AUTO_ALIASES = {"auto", "", None}
 
 UNCENSORED_TRIGGERS = re.compile(
     r"(\[(uncensored|nofilter|no-?filter|heretic)\]"
     r"|^[ \t]*(uncensored|nofilter|no-?filter)\s*:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+ULTRA_TRIGGERS = re.compile(
+    r"(\[(ultra|opus)\]|^[ \t]*(ultra|opus)\s*:)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -137,8 +162,10 @@ async def _startup() -> None:
     client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
     bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
     log.info(
-        "router up upstream=%s fast=%s agent=%s plan=%s uncensored=%s bedrock=%s",
-        UPSTREAM, FAST_MODEL, AGENT_MODEL, PLAN_MODEL, UNCENSORED_MODEL,
+        "router up upstream=%s fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
+        UPSTREAM, FAST_MODEL, AGENT_MODEL,
+        f"{ULTRA_MODEL} (active)" if _ultra_available() else f"{ULTRA_MODEL} (unwired -- triggers fall back to {AGENT_MODEL})",
+        PLAN_MODEL, UNCENSORED_MODEL,
         ",".join(bedrock_tiers) or "(none)",
     )
 
@@ -197,6 +224,23 @@ def _matches(pattern: re.Pattern[str], messages: list[dict[str, Any]] | None, pr
     return any(pattern.search(t) for t in _iter_message_text(messages))
 
 
+def _ultra_available() -> bool:
+    """True iff the ultra tier is loaded from ``models.ini``.
+
+    Every auto-route to :data:`ULTRA_MODEL` is gated on this. Without
+    the guard, an explicit ``[ultra]`` trigger or a >ULTRA_TOKEN_BUDGET
+    request on a vanilla install (no ``code-ultra`` section) would
+    rewrite ``model`` to a tier that doesn't exist downstream --
+    llama-swap returns 404, the bedrock dispatcher raises -- so the
+    request would fail even though falling back to ``code-smart``
+    would have served it just fine. The check is a cheap dict lookup
+    so we run it on every classify invocation; that also means
+    re-indexing tiers at runtime (e.g. SIGHUP -> ``_index_tiers()``)
+    flips routing behaviour live without restarting the router.
+    """
+    return ULTRA_MODEL in TIER_BY_ALIAS
+
+
 def classify(body: dict[str, Any]) -> tuple[str, str]:
     """Return (chosen_model, reason)."""
     messages = body.get("messages") if isinstance(body.get("messages"), list) else None
@@ -211,6 +255,16 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     if any(UNCENSORED_TRIGGERS.search(s) for s in (last_user, *sys_prompts) if s):
         return UNCENSORED_MODEL, "uncensored-trigger"
 
+    if any(ULTRA_TRIGGERS.search(s) for s in (last_user, *sys_prompts) if s):
+        if _ultra_available():
+            return ULTRA_MODEL, "ultra-trigger"
+        # Explicit user opt-in but the tier isn't wired up. Don't 404 --
+        # serve the request from the heaviest tier we *do* have and let
+        # the user notice in logs that their trigger was a no-op.
+        log.warning("ultra-trigger ignored: %s not in models.ini; falling back to %s",
+                    ULTRA_MODEL, AGENT_MODEL)
+        return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
+
     tools = body.get("tools") or []
     if tools:
         return AGENT_MODEL, f"tools={len(tools)}"
@@ -220,6 +274,8 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
         return AGENT_MODEL, f"turns={n_turns}"
 
     est = _estimate_tokens(messages, prompt)
+    if est > ULTRA_TOKEN_BUDGET and _ultra_available():
+        return ULTRA_MODEL, f"tokens~{est}>ultra-budget={ULTRA_TOKEN_BUDGET}"
     if est > FAST_TOKEN_BUDGET:
         return AGENT_MODEL, f"tokens~{est}"
 
@@ -288,6 +344,7 @@ async def health() -> dict[str, Any]:
         "tiers": {
             "fast": FAST_MODEL,
             "agent": AGENT_MODEL,
+            "ultra": ULTRA_MODEL if _ultra_available() else None,
             "plan": PLAN_MODEL,
             "uncensored": UNCENSORED_MODEL,
         },
@@ -328,15 +385,23 @@ async def list_models() -> JSONResponse:
                 data["data"].append(desc)
                 seen.add(alias)
 
+    ultra_blurb = (
+        f" '{ULTRA_MODEL}' for [ultra]/[opus] triggers and >{ULTRA_TOKEN_BUDGET}-token inputs,"
+        if _ultra_available() else ""
+    )
     data["data"].insert(0, {
         "id": "auto",
         "object": "model",
         "created": 0,
         "owned_by": "router",
-        "name": "Auto (router: fast/agent/plan/uncensored)",
+        "name": (
+            "Auto (router: fast/agent/ultra/plan/uncensored)" if _ultra_available()
+            else "Auto (router: fast/agent/plan/uncensored)"
+        ),
         "description": (
             f"Routes to '{FAST_MODEL}' for trivial chat, "
-            f"'{AGENT_MODEL}' for code/agent work, "
+            f"'{AGENT_MODEL}' for code/agent work,"
+            f"{ultra_blurb} "
             f"'{PLAN_MODEL}' for design/planning, "
             f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers."
         ),

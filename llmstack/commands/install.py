@@ -7,6 +7,13 @@ a runtime-only artifact owned by ``llmstack start`` (which knows the
 chosen channel and regenerates the yaml on each launch).
 
 ``--print`` writes the opencode config to stdout instead of files.
+
+When this command seeds a fresh ``models.ini`` from the bundled template
+and the ``bedrock`` extra is installed (i.e. ``import boto3`` succeeds),
+any block fenced with ``; >>> AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE >>>``
+markers in the seeded file is uncommented in place. The auto-enable
+runs only on the *initial* seed; subsequent ``install`` runs never
+mutate the user's models.ini.
 """
 
 from __future__ import annotations
@@ -27,6 +34,60 @@ from llmstack.paths import (
     remote_url,
     write_marker,
 )
+
+
+_BEDROCK_BEGIN = "; >>> AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE >>>"
+_BEDROCK_END   = "; <<< AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE <<<"
+
+
+def _try_enable_bedrock_blocks(ini_path: Path) -> int:
+    """Activate any ``AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE`` block in
+    ``ini_path`` when ``boto3`` is importable.
+
+    For each fenced block we drop the BEGIN / END marker lines and
+    strip a single leading ``"; "`` (or ``";\\t"``) from every line in
+    between -- so a doubly-commented line like ``; ; aws_profile = ...``
+    becomes a still-commented ``; aws_profile = ...`` in the active
+    config (preserving the "uncomment to use" semantics of literal
+    in-file comments). Returns the number of blocks rewritten; ``0``
+    when boto3 is missing, no markers exist, or every block is already
+    expanded.
+    """
+    try:
+        import boto3  # noqa: F401  -- presence check only
+    except ImportError:
+        return 0
+
+    text = ini_path.read_text()
+    if _BEDROCK_BEGIN not in text or _BEDROCK_END not in text:
+        return 0
+
+    out: list[str] = []
+    inside = False
+    blocks = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n").rstrip()
+        if bare == _BEDROCK_BEGIN:
+            inside = True
+            blocks += 1
+            continue
+        if bare == _BEDROCK_END:
+            inside = False
+            continue
+        if inside:
+            if line.startswith("; ") or line.startswith(";\t"):
+                out.append(line[2:])
+            elif bare == ";":
+                out.append(line[1:])
+            else:
+                out.append(line)
+        else:
+            out.append(line)
+
+    if blocks == 0:
+        return 0
+    ini_path.write_text("".join(out))
+    return blocks
 
 
 def _print_help() -> None:
@@ -53,6 +114,12 @@ def run(args: list[str]) -> int:
     ini_path, seeded = ensure_models_ini()
     if seeded:
         print(f"[*] no models.ini found -- seeded default at {ini_path}")
+        enabled = _try_enable_bedrock_blocks(ini_path)
+        if enabled:
+            print(
+                f"[*] boto3 detected -- enabled {enabled} bedrock-backed "
+                f"tier block(s) in {ini_path}"
+            )
         print("    edit it to taste, then re-run `llmstack install`.")
 
     paths = ensure_state_dirs()
