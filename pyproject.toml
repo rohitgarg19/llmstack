@@ -41,8 +41,8 @@ dev = [
 llmstack = "llmstack.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/llmstack"
-Issues = "https://github.com/your-org/llmstack/issues"
+Homepage = "https://github.com/rohitgarg19/llmstack"
+Issues = "https://github.com/rohitgarg19/llmstack/issues"
 
 [tool.setuptools.packages.find]
 include = ["llmstack*"]
