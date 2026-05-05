@@ -69,11 +69,22 @@ def main(argv: list[str] | None = None) -> int:
     yaml_cfg = parse_yaml(resolve().llama_swap_yaml)
 
     fmt = "{:<18} {:<8} {:<70} {:>10} {:>12}  {}"
-    print(fmt.format("tier", "label", "file", "size", "updated", "url"))
+    print(fmt.format("tier", "label", "file / model-id", "size", "updated", "url / region"))
     print("-" * 165)
 
     drift = []
     for tier in tiers.values():
+        if tier.is_bedrock and tier.bedrock is not None:
+            b = tier.bedrock
+            scope_parts = [p for p in (b.region, b.profile) if p]
+            scope = " / ".join(scope_parts) if scope_parts else "(default chain)"
+            print(fmt.format(tier.name, "bedrock", b.model_id, "-", "-", scope))
+            if b.has_next:
+                next_scope_parts = [p for p in (b.region_next or b.region, b.profile) if p]
+                next_scope = " / ".join(next_scope_parts) if next_scope_parts else "(default chain)"
+                print(fmt.format(tier.name, "next", b.model_id_next or "", "-", "-", next_scope))
+            continue
+
         for tf in tier.files():
             size_s, mod = hf_meta(api, tf.repo, tf.file)
             url = f"https://huggingface.co/{tf.repo}/blob/main/{tf.file}"

@@ -3,11 +3,16 @@
 A Cursor-Auto / Claude-tier-style serving setup for local GGUF models, **role-aware**:
 *coder models for agent work, chat models for planning, with an uncensored chat option for plans that need it.*
 
+Each tier can be served by either a **local GGUF** (default) or a **hosted AWS
+Bedrock model** — useful for the top-tier weights that don't fit on a laptop.
+Both backends share the same `auto` router, so opencode/curl/Cursor never need
+to know which one a tier resolves to.
+
 Built on:
 
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) — inference engine (Metal backend)
 - [`llama-swap`](https://github.com/mostlygeek/llama-swap) — multi-model process manager + OpenAI-compatible proxy
-- a tiny FastAPI **router** that adds an `auto` model with intent-based routing in front of llama-swap
+- a tiny FastAPI **router** that adds an `auto` model with intent-based routing in front of llama-swap (and AWS Bedrock)
 
 ```
 client (opencode / curl / Cursor / etc.)
@@ -142,7 +147,7 @@ opencode/                       # repo root
     │   └── binary.py           # llama-swap release downloader
     └── commands/               # one module per CLI action
         ├── setup.py            # first-time walkthrough
-        ├── install.py          # generate configs
+        ├── install.py          # generate opencode.json (+ AGENTS.md copy)
         ├── install_llama_swap.py
         ├── download.py
         ├── start.py
@@ -158,9 +163,9 @@ Per-project state (gitignored) is created lazily under `<work-dir>/.llmstack/`:
 
 ```
 .llmstack/
-├── opencode.json          consumed via OPENCODE_CONFIG
-├── AGENTS.md              copy of the package template
-├── llama-swap.yaml        generated runtime config
+├── opencode.json          consumed via OPENCODE_CONFIG (written by `install`)
+├── AGENTS.md              copy of the package template (written by `install`)
+├── llama-swap.yaml        generated runtime config (written by `start`)
 ├── default-channel        pinned by `llmstack install`
 ├── active-channel         written by `llmstack start`, removed by `stop`
 ├── llama-swap.pid         daemon pid files
@@ -195,13 +200,16 @@ sudo sysctl iogpu.wired_limit_mb=57344
 #    re-running it later is safe.
 llmstack setup
 
-# 3. Generate this project's .llmstack/opencode.json + .llmstack/llama-swap.yaml
+# 3. Generate this project's .llmstack/opencode.json (+ AGENTS.md copy).
+#    `install` does NOT touch llama-swap.yaml -- that's regenerated
+#    fresh by `start` for the channel you're booting into.
 llmstack install
 
-# 4. Bring up llama-swap + router AND drop into a subshell with
-#    OPENCODE_CONFIG pointed at .llmstack/opencode.json. Prompt is
-#    prefixed with [llmstack:current]. Run `opencode` from this subshell.
-#    Daemons keep running when you exit; stop them with `llmstack stop`.
+# 4. Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
+#    llama-swap + router, AND drop into a subshell with OPENCODE_CONFIG
+#    pointed at .llmstack/opencode.json. Prompt is prefixed with
+#    [llmstack:current]. Run `opencode` from this subshell. Daemons keep
+#    running when you exit; stop them with `llmstack stop`.
 llmstack start
 
 # 4a. Same thing but no subshell (daemons only, return immediately).
@@ -217,6 +225,47 @@ curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
 
 To stop everything: `llmstack stop`.
 
+### Windows
+
+The CLI runs the same way on Windows (PowerShell or `cmd.exe`); the only
+moving parts that differ are the binary asset and the activation hook.
+
+```powershell
+# 0. Install the package (editable, from this repo).
+py -3 -m venv .venv
+.venv\Scripts\pip install -e .
+
+# 1. Pull GGUFs + the windows_amd64 llama-swap binary (lives under
+#    %LOCALAPPDATA%\llmstack\bin\llama-swap.exe).
+.venv\Scripts\llmstack setup
+
+# 2. Generate this project's .llmstack\opencode.json (+ AGENTS.md copy).
+.venv\Scripts\llmstack install
+
+# 3. Generate .llmstack\llama-swap.yaml for the chosen channel, bring up
+#    the stack, and drop into a PowerShell subshell wired to it.
+.venv\Scripts\llmstack start
+
+# 4. Auto-activate per project from any new PowerShell window:
+Invoke-Expression (& llmstack activate powershell | Out-String)
+# or persist:
+"Invoke-Expression (& llmstack activate powershell | Out-String)" | Add-Content $PROFILE
+```
+
+Notes:
+
+- Only `windows_amd64` llama-swap binaries are published upstream; arm64
+  Windows is not supported. GPU acceleration uses whatever backend
+  `llama-server` was built with (CUDA / Vulkan / CPU) -- get
+  `llama-server.exe` from the [llama.cpp Windows releases](https://github.com/ggml-org/llama.cpp/releases)
+  or a package like `winget install ggml.llama-cpp` and put it on
+  `PATH` (or set `$env:LLAMA_SERVER_BIN`). The Mac-only
+  `iogpu.wired_limit_mb` step does not apply.
+- The `[llmstack:<channel>]` prompt prefix shows up in PowerShell too;
+  `cmd.exe` gets a simpler `[llmstack:<channel>]` prompt via `doskey`.
+- Stopping daemons uses `taskkill /T /F` under the hood, so the
+  llama-server children get cleaned up as well.
+
 ### Thin-client mode (connect to a remote llmstack)
 
 Set `LLMSTACK_REMOTE_URL` to the router URL of another machine running
@@ -231,6 +280,7 @@ export LLMSTACK_REMOTE_URL=http://10.0.0.5:10101
 
 llmstack install      # writes .llmstack/opencode.json (baseURL = remote/v1)
                       # and .llmstack/default-channel = "external <url>"
+                      # (no llama-swap.yaml -- the remote owns that)
 llmstack start        # verifies http://10.0.0.5:10101/health, enters subshell
                       # prompt is medium-purple and shows the URL:
                       #   [llmstack:opencode http://10.0.0.5:10101]
@@ -270,9 +320,9 @@ eval "$(llmstack activate bash)"
 ### Common partial flows
 
 ```bash
-llmstack install                       # binary + both configs (no GGUF downloads)
+llmstack install                       # opencode.json + AGENTS.md (no GGUF downloads)
 llmstack install-llama-swap --force    # re-pull llama-swap binary only
-llmstack setup --skip-download         # same as install
+llmstack setup --skip-download         # full setup minus the GGUF pull
 llmstack setup --skip-wait             # kick off downloads in background, install now
 llmstack check                         # snapshot configured GGUFs + flag drift
 llmstack start --next                  # try queued hf_file_next upgrades (reversible)
@@ -404,7 +454,91 @@ Triggers are *only* checked on the latest user message and the system prompt, so
 
 **Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`AGENT_SIGNALS` / `PLAN_SIGNALS` / `UNCENSORED_TRIGGERS`) or change `ROUTER_FAST_TOKEN_BUDGET`.
 
-**Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names.
+**Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names. (Note: this skips the bedrock dispatcher; only GGUF tiers will be reachable.)
+
+## Hosted tiers via AWS Bedrock
+
+Any tier in `models.ini` that declares `aws_model_id = ...` is served from
+AWS Bedrock instead of llama-swap. The same tier names + auto-routing apply,
+so swapping `code-smart` from a local GGUF to Claude on Bedrock is a
+`models.ini` edit + `llmstack install` + `llmstack restart` away — clients
+don't change.
+
+```ini
+[code-smart]
+role         = agent
+aws_model_id = anthropic.claude-sonnet-4-5-20250929-v1:0
+aws_region   = us-west-2
+aws_profile  = bedrock-prod          ; named profile in ~/.aws/config
+ctx_size     = 200000
+sampler      = temp=0.5, top_p=0.85
+description  = Claude Sonnet 4.5 on Bedrock - heavy coder for agent loops
+```
+
+`models.ini` is meant to be committable, so it **only names a profile**.
+Credentials, SSO, role chaining, MFA — everything boto3 normally
+handles — live in the standard AWS shared config:
+
+```bash
+aws configure --profile bedrock-prod        # static keys
+aws configure sso --profile bedrock-prod    # SSO
+
+# role chaining: edit ~/.aws/config, add a profile like
+# [profile bedrock-planning]
+# role_arn       = arn:aws:iam::123456789012:role/llmstack-bedrock
+# source_profile = bedrock-prod
+# region         = us-east-1
+```
+
+Then reference the profile by name from each tier. Different tiers can
+point at different profiles, so two tiers can live in different
+accounts/regions cleanly:
+
+| Key (in `models.ini`) | Meaning |
+|---|---|
+| `aws_model_id` | Bedrock model ID (`anthropic.claude-...`, `meta.llama3-1-...`, etc.). Required. |
+| `aws_region` | Region the tier lives in. Falls back to the profile's region / `AWS_REGION` / default chain. |
+| `aws_profile` | Named profile in `~/.aws/config` / `~/.aws/credentials`. Omit for boto3's default chain (env vars, default profile, instance role). |
+| `aws_endpoint_url` | Custom Bedrock endpoint (VPC endpoint, FedRAMP, etc.). |
+| `aws_model_id_next` (+ optional `aws_region_next`) | Queued upgrade target. Mirrors gguf `hf_file_next`: `llmstack start --next` swaps the tier to this model id (and region, if set) until you switch back; permanent promotion is `aws_model_id` edit + `llmstack install`. |
+| `backend = bedrock` | Optional explicit override; auto-detected from `aws_model_id`. |
+
+Banned in `models.ini` (parse-time error): `aws_access_key_id`,
+`aws_secret_access_key`, `aws_session_token`, `aws_role_arn`,
+`aws_role_session_name`. Put them in `~/.aws/credentials` or
+`~/.aws/config` under a named profile and reference the profile.
+
+Internally the router builds one `bedrock-runtime` client per
+distinct (profile, region, endpoint) tuple, cached for the life of the
+process. Credential refresh (SSO token rotation, role re-assumption,
+IMDS) is handled by boto3 transparently.
+
+Install the AWS SDK (it's an opt-in extra so the local-only path stays
+small):
+
+```bash
+pip install -e '.[bedrock]'
+```
+
+The router translates OpenAI chat/completions to [Bedrock Converse]
+(text + tool calls; streaming and non-streaming both supported) and
+streams the response back as standard OpenAI SSE. Multimodal inputs are
+text-only for now.
+
+[Bedrock Converse]: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+
+Hosted tiers are skipped by `llmstack download` (nothing to fetch) and by
+the `llama-swap.yaml` matrix (nothing to load). They show up in
+`llmstack check` with the model id + region (and a `next` row when
+`aws_model_id_next` is set) instead of HF metadata, and in `/v1/models`
+alongside the local GGUF tiers — including a `channel: current|next`
+metadata field so clients can tell which model id they're actually
+talking to.
+
+`llmstack start --next` flips both backends in lock-step: gguf tiers
+swap to `hf_file_next` and bedrock tiers swap to `aws_model_id_next`
+(the router subprocess is launched with `LLMSTACK_USE_NEXT=1`). Either
+backend having a queued upgrade is enough to satisfy `--next`.
 
 **`logs/dl-*.log` is multi-GB and growing** → you're hitting [llama.cpp issue #14802](https://github.com/ggml-org/llama.cpp/issues/14802) where modern `llama-cli` is chat-only and ignores `-no-cnv`, looping `> ` prompts forever (~1.5 MB/s). Fix: `llmstack download` already prefers `llama-completion` over `llama-cli` when both are present (`brew install llama.cpp` ships both as of 2025). If you only have legacy `llama-cli`, either upgrade `llama.cpp` or kill the runaways with `pkill -9 -f llama-cli`.
 

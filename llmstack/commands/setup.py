@@ -14,10 +14,10 @@ downloads finish.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 
+from llmstack._platform import IS_WINDOWS, shell_family
 from llmstack.commands import activate as activate_cmd
 from llmstack.download.binary import install_llama_swap
 from llmstack.download.ggufs import download_all, wait_for_downloads
@@ -68,6 +68,7 @@ def run(args: list[str]) -> int:
         print()
 
     _, shell_name = _user_shell()
+    family = shell_family(shell_name)
 
     print("[3/3] installing llama-swap binary...")
     install_llama_swap()
@@ -75,12 +76,26 @@ def run(args: list[str]) -> int:
 
     print("[4/4] wiring shell activation hook...")
     print()
-    print(f"Add the following line to your ~/{shell_name}rc to auto-activate")
+    if family in ("bash", "zsh"):
+        rc_hint = f"~/.{shell_name}rc"
+        eval_line = f'eval "$(llmstack activate {shell_name})"'
+        hook_arg = shell_name
+    elif family == "powershell":
+        rc_hint = "$PROFILE"
+        eval_line = 'Invoke-Expression (& llmstack activate powershell | Out-String)'
+        hook_arg = "powershell"
+    else:
+        rc_hint = "your shell rc file"
+        eval_line = "(no auto-activation hook for this shell yet)"
+        hook_arg = None
+
+    print(f"Add the following line to {rc_hint} to auto-activate")
     print("llmstack whenever you cd into a project with .llmstack/:")
     print()
-    print(f'    eval "$(llmstack activate {shell_name})"')
+    print(f"    {eval_line}")
     print()
-    activate_cmd.run([shell_name])
+    if hook_arg is not None:
+        activate_cmd.run([hook_arg])
 
     print()
     print("[5/5] checking opencode...")
@@ -103,7 +118,10 @@ def run(args: list[str]) -> int:
         print("[!] opencode not found in PATH.")
         print()
         print("Install it with:")
-        print("  curl -fsSL https://opencode.ai/install | sh")
+        if IS_WINDOWS:
+            print("  irm https://opencode.ai/install.ps1 | iex")
+        else:
+            print("  curl -fsSL https://opencode.ai/install | sh")
         print("  # or via npm:")
         print("  npm install -g opencode-ai")
         print()
@@ -116,7 +134,7 @@ def run(args: list[str]) -> int:
     print("[OK] setup complete.")
     print()
     print("Next steps:")
-    print(f"  1. Add the eval line above to your ~/{shell_name}rc (one time)")
+    print(f"  1. Add the eval line above to {rc_hint} (one time)")
     print("  2. llmstack install     # generate .llmstack/ configs for this project")
     print("  3. llmstack start       # bring up the stack + enter the shell")
     print()

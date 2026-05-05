@@ -1,5 +1,5 @@
 """
-FastAPI auto-router proxy in front of llama-swap.
+FastAPI auto-router proxy in front of llama-swap (and AWS Bedrock).
 
 Public endpoint: ``http://127.0.0.1:10101``
 Upstream:        ``http://127.0.0.1:10102`` (llama-swap)
@@ -7,13 +7,18 @@ Upstream:        ``http://127.0.0.1:10102`` (llama-swap)
 Behaviour:
 
 * ``GET /v1/models``                       -> proxied verbatim, plus an
-                                              ``auto`` entry.
+                                              ``auto`` entry and any
+                                              hosted (e.g. bedrock) tiers
+                                              declared in ``models.ini``.
 * ``POST /v1/chat/completions``,
   ``POST /v1/completions``
     - if request body ``model == "auto"`` (or unset), classify the request
       and rewrite ``model`` -> one of: ``code-fast``, ``code-smart``,
       ``plan``, ``plan-uncensored``.
     - otherwise pass through unchanged.
+    - tiers with ``backend = bedrock`` in ``models.ini`` are dispatched
+      to AWS Bedrock via :mod:`llmstack.backends.bedrock` instead of
+      proxied to llama-swap.
 * Streaming (SSE) responses are forwarded chunk-by-chunk.
 * Anything else is reverse-proxied.
 
@@ -51,6 +56,8 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from llmstack.tiers import Tier, load_tiers
 
 UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
 
@@ -97,8 +104,30 @@ logging.basicConfig(
 )
 log = logging.getLogger("router")
 
-app = FastAPI(title="llmstack-auto-router", version="2.0")
+app = FastAPI(title="llmstack-auto-router", version="2.1")
 client: httpx.AsyncClient | None = None
+TIERS: dict[str, Tier] = {}
+TIER_BY_ALIAS: dict[str, Tier] = {}
+
+
+def _index_tiers() -> None:
+    """Load ``models.ini`` and index by name + alias for fast lookup."""
+    global TIERS, TIER_BY_ALIAS
+    try:
+        TIERS = load_tiers()
+    except SystemExit as exc:
+        # No models.ini -- run as a pure pass-through proxy and let
+        # downstream errors describe the problem.
+        log.warning("models.ini not loaded (%s); bedrock dispatch disabled", exc)
+        TIERS = {}
+    TIER_BY_ALIAS = {}
+    for tier in TIERS.values():
+        TIER_BY_ALIAS[tier.name] = tier
+        for alias in tier.aliases:
+            TIER_BY_ALIAS.setdefault(alias, tier)
+
+
+_index_tiers()
 
 
 @app.on_event("startup")
@@ -106,9 +135,11 @@ async def _startup() -> None:
     global client
     timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
     client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
+    bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
     log.info(
-        "router up upstream=%s fast=%s agent=%s plan=%s uncensored=%s",
+        "router up upstream=%s fast=%s agent=%s plan=%s uncensored=%s bedrock=%s",
         UPSTREAM, FAST_MODEL, AGENT_MODEL, PLAN_MODEL, UNCENSORED_MODEL,
+        ",".join(bedrock_tiers) or "(none)",
     )
 
 
@@ -260,30 +291,64 @@ async def health() -> dict[str, Any]:
             "plan": PLAN_MODEL,
             "uncensored": UNCENSORED_MODEL,
         },
+        "bedrock_tiers": [t.name for t in TIERS.values() if t.is_bedrock],
     }
 
 
 @app.get("/v1/models")
 async def list_models() -> JSONResponse:
     assert client is not None
-    r = await client.get("/v1/models")
-    data = r.json()
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        data["data"].insert(0, {
-            "id": "auto",
-            "object": "model",
-            "created": 0,
-            "owned_by": "router",
-            "name": "Auto (router: fast/agent/plan/uncensored)",
-            "description": (
-                f"Routes to '{FAST_MODEL}' for trivial chat, "
-                f"'{AGENT_MODEL}' for code/agent work, "
-                f"'{PLAN_MODEL}' for design/planning, "
-                f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers."
-            ),
-            "tier": "auto",
-        })
-    return JSONResponse(content=data, status_code=r.status_code)
+    try:
+        r = await client.get("/v1/models")
+        data = r.json()
+        status = r.status_code
+    except Exception as exc:
+        log.warning("upstream /v1/models failed: %s", exc)
+        data = {"object": "list", "data": []}
+        status = 200
+
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        data = {"object": "list", "data": []}
+
+    # Hosted (bedrock) tiers aren't known to llama-swap; fold them in.
+    seen = {entry.get("id") for entry in data["data"] if isinstance(entry, dict)}
+    from llmstack.backends import bedrock as bedrock_backend
+    for tier in TIERS.values():
+        if not tier.is_bedrock:
+            continue
+        if tier.name in seen:
+            continue
+        data["data"].append(bedrock_backend.model_descriptor(tier))
+        seen.add(tier.name)
+        for alias in tier.aliases:
+            if alias not in seen:
+                desc = bedrock_backend.model_descriptor(tier)
+                desc["id"] = alias
+                desc["name"] = f"{tier.description} (alias of {tier.name})"
+                data["data"].append(desc)
+                seen.add(alias)
+
+    data["data"].insert(0, {
+        "id": "auto",
+        "object": "model",
+        "created": 0,
+        "owned_by": "router",
+        "name": "Auto (router: fast/agent/plan/uncensored)",
+        "description": (
+            f"Routes to '{FAST_MODEL}' for trivial chat, "
+            f"'{AGENT_MODEL}' for code/agent work, "
+            f"'{PLAN_MODEL}' for design/planning, "
+            f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers."
+        ),
+        "tier": "auto",
+    })
+    return JSONResponse(content=data, status_code=status)
+
+
+def _resolve_tier(name: str | None) -> Tier | None:
+    if not name:
+        return None
+    return TIER_BY_ALIAS.get(name)
 
 
 async def _handle_completion(req: Request, path: str) -> Response:
@@ -301,6 +366,12 @@ async def _handle_completion(req: Request, path: str) -> Response:
         body["model"] = chosen
         log.info("auto -> %s (%s) [path=%s]", chosen, reason, path)
         raw = json.dumps(body).encode()
+
+    chosen_name = body.get("model")
+    tier = _resolve_tier(chosen_name)
+    if tier is not None and tier.is_bedrock:
+        from llmstack.backends import bedrock as bedrock_backend
+        return await bedrock_backend.dispatch(req, tier, body)
 
     return await _stream_proxy(req.method, path, raw, headers)
 

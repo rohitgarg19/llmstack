@@ -1,110 +1,107 @@
 # Local llmstack — agent operating notes
 
-You are running inside opencode against a local llama-swap stack served by a
-FastAPI auto-router. You have access to four model tiers, but you do NOT
-choose which one runs — that's the router's job. Behave consistently
+You are running inside opencode against a local llama-swap stack. There are
+four model tiers; you do **not** pick which one runs. Behave consistently
 regardless of which tier picked up this turn.
 
-## How routing works (FYI, you don't need to act on this)
+## The four tiers
 
-Requests with `model: auto` go through the FastAPI router (`llmstack.app`),
-which classifies the request body and rewrites `model` to one of:
+| Tier              | Role               | Used for                                      |
+| ----------------- | ------------------ | --------------------------------------------- |
+| `code-fast`       | tiny resident coder | autocomplete, titles, trivial Q&A             |
+| `code-smart`      | heavy coder        | tool calls, multi-file edits, agent loops     |
+| `plan`            | chat / planner     | design discussions, architecture, trade-offs  |
+| `plan-uncensored` | unfiltered planner | only when the user explicitly opts in         |
 
-- `code-fast` — Qwen2.5-Coder 3B, default for trivial chat
-- `code-smart` — Qwen3-Coder-Next 80B MoE, picked when tools, multi-turn,
-  large context, code blocks, or "implement / fix / refactor" verbs appear
-- `plan` — Qwopus GLM 18B, picked when "design / architect / trade-off"
-  verbs appear
-- `plan-uncensored` — Mistral-Small 3.2 24B Heretic, only when the user
-  explicitly opts in via `[nofilter]` / `[uncensored]` / `nofilter:` /
-  `uncensored:` triggers
+The `plan` and `plan-uncensored` tiers back read-only agents — describe
+what should change rather than proposing `bash` / `edit` / `write` actions
+in those modes; the user runs `/build` to apply.
 
-Slash-commands are available as shortcuts:
+## `models.ini` — the source of truth
 
-- `/fast`     — pin the small coder for a one-shot answer
-- `/review`   — kick the planning model for a review pass
-- `/nofilter` — route to the no-filter model
+Tier inventory lives in `llmstack/models.ini` (bundled template) and
+`.llmstack/models.ini` (per-project copy). When the user asks "what model
+is X" or "which tiers are wired up", read **`models.ini`**. Nothing else
+is canonical.
 
-## House style
+Each tier section declares one of two backends:
 
-- Be concise. Local models are slower per token than hosted ones;
-  every redundant paragraph costs the user real wall-clock time.
-- Do not narrate file edits in prose — let the diff speak.
-- When unsure between two approaches, pick one and explain the trade-off
-  in one sentence rather than asking the user to choose.
-- Code comments should explain non-obvious intent, not restate the code.
-- Prefer editing existing files to creating new ones.
+- **`gguf`** (default, auto-detected from `hf_repo` + `hf_file`) — local
+  weights served by llama-swap.
+- **`bedrock`** (auto-detected from `aws_model_id`) — hosted AWS Bedrock
+  model called directly by the router. Credentials are scoped per tier
+  (different tiers can live in different accounts/regions). See the
+  `[BEDROCK EXAMPLES]` block at the bottom of the file.
+
+Keys you'll see commonly:
+
+- `hf_repo` / `hf_file` — current GGUF.
+- `hf_file_next` (and optional `hf_repo_next`) — queued upgrade target;
+  swapped in when `LLMSTACK_CHANNEL=next`.
+- `ctx_size`, `sampler`, `quant`, `size_gb` — runtime knobs / metadata.
+- `[ROUTING]` — tunables for the auto-router (signal words, token budgets,
+  uncensored triggers). Edit here, not in the router code.
+
+If the user wants to change model selection, add a tier, or swap to
+Bedrock, they edit `models.ini` and re-run `llmstack install`.
+
+## When you edit `models.ini` on the user's behalf
+
+Edit **`.llmstack/models.ini`** (the per-project live copy) — *not* the
+bundled template at `llmstack/models.ini`, which only seeds the project
+copy on first install. Then apply the change:
+
+```bash
+llmstack install     # regenerate opencode.json from models.ini
+llmstack restart     # regenerate llama-swap.yaml + cycle daemons so it's live
+```
+
+Notes:
+
+- `install` only writes `opencode.json` (+ AGENTS.md copy). The
+  llama-swap config is owned by `start`/`restart` -- they regenerate
+  `llama-swap.yaml` for the resolved channel on each fresh launch.
+- If you only changed routing-relevant keys that opencode cares about
+  (model lists, agent wiring), `install` alone is enough -- opencode
+  re-reads its config per request.
+- For tier-runtime changes (sampler, ctx, GGUF file, Bedrock creds),
+  the daemons need to come down: `llmstack restart` regenerates the
+  yaml and cycles them.
+- `restart` accepts the same channel flags as `start` (`--current` /
+  `--next`); pass through whatever channel the user is on.
+- Don't run `restart` if the only thing you changed was the `description`
+  or a comment -- those don't reach the runtime; `install` is fine.
+- If `llmstack install` or the yaml regen during `start` fails validation,
+  fix `models.ini` and re-run; the generated files are written atomically
+  so a failure leaves the previous good config in place.
 
 ## Do NOT scan `.llmstack/`
 
 `.llmstack/` is per-project runtime state — auto-generated, gitignored,
-not source. Skip it during search, exploration, and bulk reads:
+regenerated on every `llmstack install` (opencode.json) or `llmstack
+start` (llama-swap.yaml). Skip it during search, exploration, and bulk
+reads:
 
-- Do not `grep` / `rg` / `glob` into `.llmstack/` to answer questions
-  about the project. The answers live in `llmstack/` (the package),
-  in `llmstack/generators/*.py`, or in the bundled
-  `llmstack/models.ini` template.
-- Do not read `.llmstack/llama-swap.yaml` or `.llmstack/opencode.json`
-  to understand intent — they are regenerated on every `llmstack
-  install` and will silently lie about the design. Read the generators
-  and the models.ini they consume instead.
-- Do not read anything under `.llmstack/logs/` unless the user is
-  actively debugging a runtime issue and points you there. Log files
-  are large, noisy, and burn context.
-- `.llmstack/models.ini` is fair game when the user asks "which tiers
-  is *this* project wired up for" — it's the project-local copy of
-  the template — but treat the bundled `llmstack/models.ini` as the
-  canonical reference for defaults.
+- Don't `grep` / `rg` / glob into `.llmstack/` to answer questions about
+  the project. Answers live in the `llmstack/` package and `models.ini`.
+- Don't read `.llmstack/llama-swap.yaml` or `.llmstack/opencode.json`
+  to understand intent — they're generated outputs and will silently
+  mislead. Read the generators or `models.ini` instead.
+- Don't read `.llmstack/logs/**` unless the user is actively debugging a
+  runtime issue and points you there. Logs are large and burn context.
+- `.llmstack/models.ini` is fair game when the user asks "which tiers is
+  *this* project wired up for" — it's the project-local copy.
 
 If a tool call returns matches inside `.llmstack/`, treat them as noise
 and re-scope the search to exclude that directory.
 
-## Environment facts
+## House style
 
-- macOS on Apple Silicon, Metal acceleration via llama.cpp.
-- Local-only stack: no outbound network calls, no telemetry, no sharing.
-- The `plan` and `plan-nofilter` agents are read-only by configuration —
-  do not propose `bash`/`edit`/`write` actions in those modes; describe
-  what should change and let the user run `/build` to apply it.
-- Title generation, summaries, and other "small_model" calls go to the
-  3B coder. Keep titles under 6 words.
-
-## When the user mentions the stack itself
-
-The stack is the `llmstack` Python package, exposed as the `llmstack` CLI
-(`pip install -e .` from this repo). Source of truth is
-`.llmstack/models.ini` in the project (or `$LLMSTACK_MODELS_INI`); the
-per-project `.llmstack/llama-swap.yaml` and `.llmstack/opencode.json` are
-auto-generated
-by `llmstack.generators.llama_swap` and `llmstack.generators.opencode`,
-overwritten on every `llmstack install`. Never hand-edit the generated files;
-edit `models.ini` or the generators. The user's *global* opencode config at
-`~/.config/opencode/opencode.json` is intentionally NOT touched by this
-stack — opencode picks up our config because `OPENCODE_CONFIG` is exported
-in the subshell that `llmstack start` drops the user into.
-
-`opencode.json` (and this `AGENTS.md` next to it) lives in `$PWD/.llmstack/`
-of wherever `llmstack` was invoked. The user can `cd` into any project,
-run `llmstack start`, and get a project-local opencode config there.
-The llama-swap and router daemons are singleton on ports 10101/10102 and
-shared across projects; `start` from a second project detects the running
-daemons and reuses them rather than fighting for the ports. If you see
-`LLMSTACK_CHANNEL=external` it means the daemons were launched from a
-different project's `.llmstack/`.
-
-`LLMSTACK_CHANNEL` values you may see:
-
-- `current` — local stack, canonical channel.
-- `next` — local stack, but the underlying GGUF files have been swapped
-  to the queued upgrade target for any tier with `hf_file_next` set in
-  `models.ini`. Semantics otherwise unchanged.
-- `external` — **the user is a thin client of a remote llmstack**
-  (`LLMSTACK_REMOTE_URL` is set; the prompt is medium-purple and shows
-  the URL: `[llmstack:<project> <url>]`). No llama-swap or router runs
-  on this host; opencode talks to the remote router directly. The user
-  can't inspect logs, reload daemons, or change channels from this side
-  — all of that has to happen on the remote host.
-- `shared` — local daemons are running, but they were started by a
-  different project on this host (no pid file in this project's
-  `.llmstack/`). Stopping or restarting the stack from here will affect
-  every project on this host that's currently using those daemons.
+- Be concise. Local models are slower per token than hosted ones; every
+  redundant paragraph costs the user real wall-clock time.
+- Don't narrate file edits in prose — let the diff speak.
+- When unsure between two approaches, pick one and explain the trade-off
+  in one sentence rather than asking the user to choose.
+- Comments should explain non-obvious intent, not restate the code.
+- Prefer editing existing files to creating new ones.
+- Title generation goes to the 3B coder. Keep titles under 6 words.

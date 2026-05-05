@@ -25,6 +25,7 @@ import urllib.request
 
 import yaml
 
+from llmstack._platform import IS_WINDOWS
 from llmstack.commands._helpers import is_running, pgrep, port_responds, read_pid
 from llmstack.paths import (
     ROUTER_PORT,
@@ -55,6 +56,75 @@ def _check_local(name: str, url: str) -> None:
         status = "DOWN"
     suffix = f"OK {url}" if responds else f"no response @ {url}"
     print(f"  {name:<12} {status:<11}  {suffix}")
+
+
+def _print_process_table(pids: list[int]) -> None:
+    """Render ``pid / rss_mb / command`` for each pid (cross-OS).
+
+    POSIX: ``ps -o pid,rss,command`` (rss is in KB, we humanise to MB).
+    Windows: ``tasklist /FI "PID eq ..." /FO CSV`` (image name + memory
+    usage). Both branches print a header row.
+    """
+    if IS_WINDOWS:
+        rows: list[tuple[str, str, str]] = []
+        for pid in pids:
+            try:
+                proc = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if proc.returncode != 0 or not proc.stdout.strip():
+                continue
+            import csv
+            for fields in csv.reader(proc.stdout.splitlines()):
+                if len(fields) < 5:
+                    continue
+                image, pid_str, _session, _sid, mem = fields[0], fields[1], fields[2], fields[3], fields[4]
+                if not pid_str.isdigit():
+                    continue
+                rss_mb = mem.replace(",", "").replace(" K", "").strip()
+                try:
+                    rss_mb = f"{int(rss_mb) // 1024} MB"
+                except ValueError:
+                    pass
+                rows.append((pid_str, rss_mb, image))
+        if not rows:
+            print("  (tasklist returned nothing)")
+            return
+        print(f"  {'PID':<8} {'RSS':<10} COMMAND")
+        for pid_str, rss, cmd in rows:
+            print(f"  {pid_str:<8} {rss:<10} {cmd}")
+        return
+
+    try:
+        ps = subprocess.run(
+            ["ps", "-o", "pid,rss,command", "-p", ",".join(str(p) for p in pids)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        print("  (ps failed)")
+        return
+    for i, line in enumerate(ps.stdout.splitlines()):
+        if i == 0:
+            print(line)
+            continue
+        cols = line.split()
+        if len(cols) >= 3:
+            try:
+                rss_mb = int(cols[1]) // 1024
+                cols[1] = f"{rss_mb} MB"
+            except ValueError:
+                pass
+        print(" ".join(cols))
 
 
 def _list_models(base: str) -> None:
@@ -144,28 +214,7 @@ def run(args: list[str]) -> int:
     print("loaded llama-server processes:")
     pids = pgrep(r"llama-server.*--alias")
     if pids:
-        try:
-            ps = subprocess.run(
-                ["ps", "-o", "pid,rss,command", "-p", ",".join(str(p) for p in pids)],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            for i, line in enumerate(ps.stdout.splitlines()):
-                if i == 0:
-                    print(line)
-                    continue
-                cols = line.split()
-                if len(cols) >= 3:
-                    try:
-                        rss_mb = int(cols[1]) // 1024
-                        cols[1] = f"{rss_mb} MB"
-                    except ValueError:
-                        pass
-                print(" ".join(cols))
-        except (OSError, subprocess.SubprocessError):
-            print("  (ps failed)")
+        _print_process_table(pids)
     else:
         print("  (none loaded)")
 

@@ -3,8 +3,11 @@
 Two top-level modes:
 
   *Local mode* (default)
-    Launch llama-swap + the FastAPI router locally and drop into a
-    subshell with ``OPENCODE_CONFIG`` exported.
+    Generate ``llama-swap.yaml`` for the chosen channel, launch
+    llama-swap + the FastAPI router locally, and drop into a subshell
+    with ``OPENCODE_CONFIG`` exported. The yaml is regenerated on every
+    fresh launch so it always reflects the live ``models.ini``; if the
+    daemons are already up we leave their loaded yaml alone.
 
     Channel resolution (highest priority first):
       1. explicit ``--current`` / ``--next`` on the command line
@@ -12,12 +15,13 @@ Two top-level modes:
       3. hard-coded fallback: ``current``
 
     Daemon state has three branches:
-      (a) local pid file says daemons are up      -> idempotent, channel-checked
+      (a) local pid file says daemons are up      -> idempotent, channel-checked,
+                                                     no yaml regeneration
       (b) port 10102 responds but no local pid    -> daemons started by
                                                      another project on this
                                                      host; reuse them.
                                                      Channel label: **shared**.
-      (c) nothing                                 -> launch fresh
+      (c) nothing                                 -> regenerate yaml, launch fresh
 
   *Remote / client mode* -- when ``$LLMSTACK_REMOTE_URL`` is set
     Don't launch anything; verify the remote ``/health`` endpoint is
@@ -52,7 +56,7 @@ from llmstack.paths import (
     write_marker,
 )
 from llmstack.shell_env import spawn_subshell
-from llmstack.tiers import iter_download_targets
+from llmstack.tiers import load_tiers
 
 
 def _print_help() -> None:
@@ -60,7 +64,13 @@ def _print_help() -> None:
 
 
 def _queued_next_tiers() -> list[str]:
-    return sorted({tf.tier for tf in iter_download_targets() if tf.label == "next"})
+    """Names of every tier that has *some* queued upgrade target.
+
+    Backend-aware: gguf tiers with ``hf_file_next`` qualify, and so do
+    bedrock tiers with ``aws_model_id_next``. Used to short-circuit
+    ``--next`` when nothing's queued.
+    """
+    return sorted(t.name for t in load_tiers().values() if t.has_next)
 
 
 def _start_remote(detach: bool) -> int:
@@ -157,8 +167,6 @@ def run(args: list[str]) -> int:
         raise SystemExit(f"missing {paths.llama_swap_bin} (run: llmstack setup)")
     if not paths.opencode_json.is_file():
         raise SystemExit(f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install")
-    if channel == "current" and not paths.llama_swap_yaml.is_file():
-        raise SystemExit(f"missing {paths.llama_swap_yaml} (run: llmstack install)")
 
     launch_daemons = True
     shared_daemons = False
@@ -181,20 +189,27 @@ def run(args: list[str]) -> int:
         print(f"[*] daemons already up on :{ROUTER_PORT}/:{SWAP_PORT} (started by another project on this host)")
         print("    will reuse them. Use 'llmstack stop' from any project to stop.")
 
-    if channel == "next" and launch_daemons:
-        queued = _queued_next_tiers()
-        if not queued:
-            print(
-                "[!] no tiers have hf_file_next set in models.ini -- nothing to do.",
-                file=sys.stderr,
-            )
-            print("    add an hf_file_next line to a tier and re-run, or use --current.", file=sys.stderr)
-            return 1
-        print(f"[*] generating next-channel yaml -> {paths.llama_swap_yaml}")
-        print(f"    queued upgrade tiers: {' '.join(queued)}")
+    if launch_daemons:
+        if channel == "next":
+            queued = _queued_next_tiers()
+            if not queued:
+                print(
+                    "[!] no tiers have hf_file_next or aws_model_id_next set in models.ini -- "
+                    "nothing to do.",
+                    file=sys.stderr,
+                )
+                print(
+                    "    add a *_next line to a tier and re-run, or use --current.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"[*] generating next-channel yaml -> {paths.llama_swap_yaml}")
+            print(f"    queued upgrade tiers: {' '.join(queued)}")
+        else:
+            print(f"[*] generating yaml -> {paths.llama_swap_yaml}")
         render_to(
             paths.llama_swap_yaml,
-            render=lambda p: Path(p).write_text(render_yaml(use_next=True)),
+            render=lambda p: Path(p).write_text(render_yaml(use_next=(channel == "next"))),
             validate=validate_yaml,
         )
 
@@ -228,6 +243,12 @@ def run(args: list[str]) -> int:
         env.setdefault("LLAMA_SWAP_URL", f"http://127.0.0.1:{SWAP_PORT}")
         env.setdefault("ROUTER_HOST", "127.0.0.1")
         env.setdefault("ROUTER_PORT", str(ROUTER_PORT))
+        # Lock-step with the gguf --use-next swap: bedrock tiers in the
+        # router pick aws_model_id_next when this flag is set.
+        if channel == "next":
+            env["LLMSTACK_USE_NEXT"] = "1"
+        else:
+            env.pop("LLMSTACK_USE_NEXT", None)
         spawn_daemon(
             [sys.executable, "-m", "llmstack.app"],
             log=paths.log_dir / "router.log",

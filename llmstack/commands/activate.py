@@ -8,7 +8,7 @@ from llmstack.shell_env import activate_hook
 
 
 def _print_help() -> None:
-    print("usage: llmstack activate <zsh|bash>")
+    print("usage: llmstack activate <zsh|bash|powershell>")
 
 
 def run(args: list[str]) -> int:

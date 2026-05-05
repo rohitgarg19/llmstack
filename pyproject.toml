@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmstack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-tier local LLM stack: llama-swap + FastAPI auto-router + opencode wiring."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,9 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -35,6 +38,10 @@ dependencies = [
 dev = [
     "ruff>=0.4",
     "pytest>=7",
+]
+bedrock = [
+    "boto3>=1.35",
+    "botocore>=1.35",
 ]
 
 [project.scripts]

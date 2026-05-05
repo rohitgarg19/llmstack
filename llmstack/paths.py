@@ -32,6 +32,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from llmstack._platform import EXE_SUFFIX, user_data_root
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 AGENTS_TEMPLATE = PACKAGE_DIR / "AGENTS.md"
@@ -73,9 +75,14 @@ def router_health_url() -> str:
 
 
 def _xdg_data_home() -> Path:
-    """``$XDG_DATA_HOME`` with the spec-defined fallback."""
-    raw = os.environ.get("XDG_DATA_HOME") or ""
-    return Path(raw) if raw else Path.home() / ".local" / "share"
+    """Persistent per-user data root.
+
+    POSIX: ``$XDG_DATA_HOME`` with the spec-defined fallback
+    (``~/.local/share``). Windows: ``$LOCALAPPDATA`` with the standard
+    Windows fallback. The platform shim keeps the two branches in one
+    place.
+    """
+    return user_data_root()
 
 
 def models_ini_path() -> Path:
@@ -150,7 +157,7 @@ def resolve() -> Paths:
         bin_dir=bind,
         state_dir=state,
         log_dir=state / "logs",
-        llama_swap_bin=bind / "llama-swap",
+        llama_swap_bin=bind / f"llama-swap{EXE_SUFFIX}",
         llama_swap_yaml=state / "llama-swap.yaml",
         opencode_json=opencode_dir / "opencode.json",
         agents_local=state / "AGENTS.md",

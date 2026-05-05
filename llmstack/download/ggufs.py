@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from llmstack._platform import detached_popen, find_pids
 from llmstack.paths import ensure_state_dirs, resolve, require_models_ini
-from llmstack.tiers import iter_download_targets
+from llmstack.tiers import iter_download_targets, load_tiers
 
 LLAMA_BINS = ("llama-completion", "llama-cli")
 
@@ -70,13 +70,7 @@ def _spawn(llama_bin: str, repo: str, file: str, log: Path, hf_token: str | None
 
     log.parent.mkdir(parents=True, exist_ok=True)
     fp = log.open("wb")
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=fp,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    proc = detached_popen(argv, stdout=fp, stderr=fp)
     fp.close()
     return proc.pid
 
@@ -89,12 +83,25 @@ def download_all() -> list[DownloadJob]:
     """
     require_models_ini()
     paths = ensure_state_dirs()
-    llama_bin = _find_llama_bin()
     hf_token = os.environ.get("HF_TOKEN") or None
 
+    targets = list(iter_download_targets())
+    hosted_tiers = sorted(t.name for t in load_tiers().values() if not t.is_gguf)
+
+    print(f"[*] inventory:  {paths.models_ini}")
+    if hosted_tiers:
+        print(f"[*] hosted (no download): {', '.join(hosted_tiers)}")
+
+    if not targets:
+        # All tiers in the ini are hosted (e.g. bedrock-only) -- nothing
+        # to fetch. Don't fail; downloads are an optional step in a
+        # cloud-only deployment.
+        print("[*] no GGUF tiers configured -- nothing to download.")
+        return []
+
+    llama_bin = _find_llama_bin()
     print(f"[*] downloader: {llama_bin}")
     print("[*] cache:      ~/.cache/huggingface/hub  (default for llama.cpp)")
-    print(f"[*] inventory:  {paths.models_ini}")
     if hf_token:
         print("[*] HF_TOKEN set (faster rate limits)")
     else:
@@ -102,7 +109,7 @@ def download_all() -> list[DownloadJob]:
     print()
 
     jobs: list[DownloadJob] = []
-    for tf in iter_download_targets():
+    for tf in targets:
         log = paths.log_dir / f"dl-{tf.tag}.log"
         print(f"[*] {tf.tag:<32} ({tf.label:<7}) {tf.repo} / {tf.file}")
         print(f"    log -> {log}")
@@ -112,9 +119,6 @@ def download_all() -> list[DownloadJob]:
             tag=tf.tag, repo=tf.repo, file=tf.file, label=tf.label,
             log=log, pid=pid,
         ))
-
-    if not jobs:
-        raise SystemExit(f"no download targets found in {paths.models_ini}")
 
     print()
     print(f"{len(jobs)} download(s) queued in the background.")
@@ -131,26 +135,11 @@ def download_all() -> list[DownloadJob]:
 def running_downloads() -> int:
     """Return the count of in-flight ``llama-{completion,cli}`` HF downloads.
 
-    Uses ``pgrep -f`` because we don't want to add a ``psutil`` dependency
-    just for one ad-hoc check. Returns 0 when ``pgrep`` is missing.
+    Cross-platform via :func:`llmstack._platform.find_pids`: POSIX uses
+    ``pgrep -f`` under the hood, Windows uses PowerShell's
+    ``Get-CimInstance``. Returns 0 when neither lookup tool is available.
     """
-    if not shutil.which("pgrep"):
-        return 0
-    pattern = r"llama-(completion|cli) .*-hf "
-    try:
-        proc = subprocess.run(
-            ["pgrep", "-f", pattern],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except FileNotFoundError:
-        return 0
-    if proc.returncode not in (0, 1):
-        return 0
-    pids = [line for line in proc.stdout.splitlines() if line.strip()]
-    return len(pids)
+    return len(find_pids(r"llama-(completion|cli).*-hf "))
 
 
 def wait_for_downloads(poll_seconds: float = 10.0, *, log_dir: Path | None = None) -> None:

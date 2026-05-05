@@ -37,9 +37,12 @@ Actions:
       the llama-swap binary, print the shell activation hook, check opencode.
 
   install [--print] [--current | --next]
-      Regenerate llama-swap.yaml + .llmstack/opencode.json from models.ini.
-      Seeds a default models.ini in the work-dir on first run if none exists.
-      --print writes both configs to stdout instead of files.
+      Regenerate .llmstack/opencode.json (+ AGENTS.md copy) from models.ini
+      and pin the default channel for the next `start`. Seeds a default
+      models.ini in the work-dir on first run if none exists. --print
+      writes the opencode config to stdout instead of files. Note:
+      llama-swap.yaml is NOT touched here -- `start` owns that and
+      regenerates it for the chosen channel on each launch.
 
   install-llama-swap [--force]
       (Re-)download the llama-swap Go binary into $LLMSTACK_BIN_DIR (default
@@ -50,9 +53,13 @@ Actions:
       the standard llama.cpp cache, in parallel, in the background.
 
   start [--current | --next] [--detach]
-      Bring up llama-swap (:10102) + auto-router (:10101) AND drop into a
-      subshell with OPENCODE_CONFIG set. Default channel = `current`. `--next`
-      swaps any tier with hf_file_next. `--detach` skips the subshell.
+      Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
+      llama-swap (:10102) + auto-router (:10101) AND drop into a subshell
+      with OPENCODE_CONFIG set. Default channel = whatever `install`
+      pinned, else `current`. `--next` swaps any tier with hf_file_next.
+      `--detach` skips the subshell. The yaml is regenerated on each
+      fresh launch so it always matches the live models.ini; if the
+      daemons are already up the running yaml is left alone.
 
       When LLMSTACK_REMOTE_URL is set, no daemons are launched: this just
       verifies the remote /health endpoint and drops into a client
