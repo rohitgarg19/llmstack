@@ -6,6 +6,20 @@ Renders the opencode config atomically (tmp file in target dir, validate,
 a runtime-only artifact owned by ``llmstack start`` (which knows the
 chosen channel and regenerates the yaml on each launch).
 
+This is also where the **channel** is decided -- everything downstream
+(``start``, ``status``, the activate hook) reads the persisted choice
+from ``.llmstack/default-channel`` and never re-derives it. Three
+channels exist:
+
+  * ``current``   -- local stack, canonical channel (default)
+  * ``next``      -- local stack, queued-upgrade channel
+  * ``external``  -- thin client; no daemons launched. Opt in via
+                    ``--external [URL]`` (URL defaults to the local
+                    router, ``http://127.0.0.1:10101``, so two
+                    projects on one host can share daemons without
+                    fighting for ports). ``LLMSTACK_REMOTE_URL`` in the
+                    environment is honoured as an alternative way in.
+
 ``--print`` writes the opencode config to stdout instead of files.
 
 When this command seeds a fresh ``models.ini`` from the bundled template
@@ -20,6 +34,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from llmstack.generators import render_to
@@ -27,11 +43,11 @@ from llmstack.generators.opencode import render as render_opencode
 from llmstack.generators.opencode import validate as validate_opencode
 from llmstack.paths import (
     AGENTS_TEMPLATE,
+    DEFAULT_REMOTE_URL,
     ChannelMark,
     ensure_models_ini,
     ensure_state_dirs,
-    is_remote,
-    remote_url,
+    env_remote_url,
     write_marker,
 )
 
@@ -90,46 +106,210 @@ def _try_enable_bedrock_blocks(ini_path: Path) -> int:
 
 
 def _print_help() -> None:
-    print("usage: llmstack install [--print] [--current | --next]")
+    print(
+        "usage: llmstack install [--print] [--current | --next] "
+        "[--external [URL]]"
+    )
 
 
-def run(args: list[str]) -> int:
+def _parse_args(args: list[str]) -> tuple[bool, str, str | None, bool]:
+    """Parse ``install``'s flags.
+
+    Returns ``(print_only, local_channel, external_url, want_external)``:
+
+      * ``local_channel`` is ``current`` or ``next`` -- ignored when
+        ``want_external`` is ``True``.
+      * ``external_url`` is the explicit URL given to ``--external <url>``,
+        if any. ``None`` when the flag was bare or absent.
+      * ``want_external`` is ``True`` iff the user passed ``--external``
+        (with or without a URL). The env-var fallback is layered in by
+        the caller, not here, so this stays a pure CLI parse.
+
+    ``--external`` accepts either ``--external <url>`` (separate arg) or
+    ``--external=<url>``. Mutually exclusive with ``--current`` /
+    ``--next`` -- mixing them raises ``SystemExit``.
+    """
     print_only = False
-    default_channel = "current"
-    for arg in args:
+    local_channel = "current"
+    local_explicit = False
+    external_url: str | None = None
+    want_external = False
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
         if arg in ("--print", "-n"):
             print_only = True
         elif arg == "--next":
-            default_channel = "next"
+            local_channel = "next"
+            local_explicit = True
         elif arg == "--current":
-            default_channel = "current"
+            local_channel = "current"
+            local_explicit = True
+        elif arg == "--external":
+            want_external = True
+            # Optional URL as next positional, but only if it looks like
+            # a URL (not the next flag).
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                external_url = args[i + 1]
+                i += 1
+        elif arg.startswith("--external="):
+            want_external = True
+            external_url = arg[len("--external="):]
         elif arg in ("-h", "--help"):
             _print_help()
-            return 0
+            raise SystemExit(0)
         else:
-            print(f"[!] unknown arg to install: {arg} (try --print, --current, --next, -h)")
-            return 2
-
-    ini_path, seeded = ensure_models_ini()
-    if seeded:
-        print(f"[*] no models.ini found -- seeded default at {ini_path}")
-        enabled = _try_enable_bedrock_blocks(ini_path)
-        if enabled:
             print(
-                f"[*] boto3 detected -- enabled {enabled} bedrock-backed "
-                f"tier block(s) in {ini_path}"
+                f"[!] unknown arg to install: {arg} "
+                "(try --print, --current, --next, --external, -h)"
             )
-        print("    edit it to taste, then re-run `llmstack install`.")
+            raise SystemExit(2)
+        i += 1
+
+    if want_external and local_explicit:
+        print(
+            "[!] --external is mutually exclusive with --current / --next "
+            "(external installs don't run local daemons).",
+        )
+        raise SystemExit(2)
+
+    return print_only, local_channel, external_url, want_external
+
+
+def _resolve_external_url(flag_url: str | None) -> str:
+    """Pick the URL to bake into opencode.json + the channel marker.
+
+    Precedence: explicit ``--external <url>`` arg > ``$LLMSTACK_REMOTE_URL``
+    env var > :data:`DEFAULT_REMOTE_URL` (the local router). The default
+    is what makes the "two projects on one host" workflow zero-config:
+    ``llmstack install --external`` with nothing else set wires this
+    project as a thin client of localhost so it can ride alongside
+    whichever project actually owns the daemons.
+
+    The ``$LLMSTACK_REMOTE_URL`` rung is what the activate hook
+    populates when the user ``cd``-s into a project pinned to
+    ``external`` -- so re-running ``llmstack install`` from an active
+    shell inside an external project doesn't require the URL again.
+    """
+    if flag_url:
+        return flag_url.rstrip("/")
+    env = env_remote_url()
+    if env:
+        return env
+    return DEFAULT_REMOTE_URL
+
+
+def _fetch_remote_models_ini(url: str) -> str:
+    """Pull the live ``models.ini`` from a remote llmstack router.
+
+    External installs use the router as the source of truth for tier
+    inventory: the same file the router parsed at startup is what the
+    thin client renders ``opencode.json`` against, so tier names +
+    descriptions agree with what the router actually serves. The fetch
+    is also the canonical health check -- a 200 with parseable INI
+    content proves both that the router is reachable and that the
+    operator on the remote side has wired their config.
+
+    Raises ``SystemExit`` (with a user-facing message) on any failure
+    -- DNS, connection refused, non-2xx, empty body. The thin-client
+    install is meaningless without the file, so we refuse to write a
+    stale opencode.json from cached state. There is no client-side
+    cache: every ``install`` re-fetches.
+    """
+    fetch_url = f"{url.rstrip('/')}/models.ini"
+    req = urllib.request.Request(fetch_url, headers={"Accept": "text/plain"})
+    try:
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            if resp.status != 200:
+                raise SystemExit(
+                    f"[!] {fetch_url} returned HTTP {resp.status} -- "
+                    "the remote router is up but doesn't have a "
+                    "models.ini. Run `llmstack install` on the router "
+                    "host to seed one, then retry here."
+                )
+            charset = resp.headers.get_content_charset() or "utf-8"
+            text = resp.read().decode(charset)
+    except urllib.error.HTTPError as e:
+        raise SystemExit(
+            f"[!] {fetch_url} returned HTTP {e.code} {e.reason}.\n"
+            "    is the remote running an llmstack version with "
+            "GET /models.ini? (added in v3.x)"
+        ) from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise SystemExit(
+            f"[!] failed to reach {fetch_url}: {e}\n"
+            "    check the URL, the network path, and that the remote "
+            "router is up."
+        ) from e
+
+    if not text.strip():
+        raise SystemExit(
+            f"[!] {fetch_url} returned an empty body -- nothing to "
+            "render opencode.json from."
+        )
+    return text
+
+
+def run(args: list[str]) -> int:
+    try:
+        print_only, local_channel, external_url_arg, want_external = _parse_args(args)
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else 0
+
+    # Env-var fallback: ``LLMSTACK_REMOTE_URL`` set without ``--external``
+    # still implies external mode. The activate hook re-exports this
+    # var from the channel marker when the user ``cd``-s into an
+    # external project, so re-running ``llmstack install`` from inside
+    # an active shell doesn't need the URL or the flag again.
+    if not want_external and env_remote_url() is not None:
+        want_external = True
+
+    if want_external:
+        remote = _resolve_external_url(external_url_arg)
+        channel: str = "external"
+    else:
+        remote = None
+        channel = local_channel
+
+    # Source of the INI is mode-dependent. Local mode reads (and
+    # seeds-if-missing) the per-project file. External mode pulls the
+    # router's live copy on every install -- the thin client never
+    # keeps a local models.ini, since that would just be a stale
+    # mirror of the router's truth.
+    ini_text: str | None = None
+    ini_source_label: str
+    if remote is not None:
+        # Flush so the "fetching" line lands before the network call;
+        # otherwise an error written to stderr from inside
+        # _fetch_remote_models_ini races ahead of buffered stdout and
+        # the user sees the failure message before the "what we're
+        # doing" message.
+        print(f"[*] fetching models.ini from {remote}/models.ini ...", flush=True)
+        ini_text = _fetch_remote_models_ini(remote)
+        print(f"[OK] {len(ini_text.splitlines())} lines from {remote}")
+        ini_source_label = f"{remote}/models.ini"
+    else:
+        ini_path, seeded = ensure_models_ini()
+        if seeded:
+            print(f"[*] no models.ini found -- seeded default at {ini_path}")
+            enabled = _try_enable_bedrock_blocks(ini_path)
+            if enabled:
+                print(
+                    f"[*] boto3 detected -- enabled {enabled} bedrock-backed "
+                    f"tier block(s) in {ini_path}"
+                )
+            print("    edit it to taste, then re-run `llmstack install`.")
+        ini_source_label = str(ini_path)
 
     paths = ensure_state_dirs()
-    remote = is_remote()
 
     if print_only:
-        if remote:
-            print(f"# remote mode (LLMSTACK_REMOTE_URL={remote_url()}); llama-swap.yaml not used.")
+        if remote is not None:
+            print(f"# external mode (channel: external, remote: {remote}); llama-swap.yaml not used.")
             print()
         print("----- opencode.json -----")
-        print(render_opencode())
+        print(render_opencode(ini_text=ini_text, remote=remote))
         return 0
 
     print("[1/2] AGENTS.md")
@@ -147,7 +327,9 @@ def run(args: list[str]) -> int:
     try:
         render_to(
             paths.opencode_json,
-            render=lambda p: Path(p).write_text(render_opencode()),
+            render=lambda p: Path(p).write_text(
+                render_opencode(ini_text=ini_text, remote=remote)
+            ),
             validate=validate_opencode,
         )
     finally:
@@ -157,26 +339,26 @@ def run(args: list[str]) -> int:
             os.environ["OPENCODE_INSTRUCTIONS"] = prev
     print(f"[OK] installed {paths.opencode_json}")
 
-    if remote:
-        write_marker(paths.default_marker, ChannelMark("external", remote_url()))
-        print(f"[OK] default channel: external (remote: {remote_url()})")
+    if remote is not None:
+        write_marker(paths.default_marker, ChannelMark("external", remote))
+        print(f"[OK] default channel: external (remote: {remote})")
     else:
-        write_marker(paths.default_marker, ChannelMark(default_channel))
-        print(f"[OK] default channel: {default_channel}")
+        write_marker(paths.default_marker, ChannelMark(channel))
+        print(f"[OK] default channel: {channel}")
 
     print()
-    print(f"[OK] opencode config generated from {paths.models_ini}.")
+    print(f"[OK] opencode config generated from {ini_source_label}.")
     print()
     print(f"  config:       {paths.opencode_json}")
     print(f"  instructions: {paths.agents_local}")
-    if remote:
-        print(f"  remote:       {remote_url()}")
+    if remote is not None:
+        print(f"  remote:       {remote}")
     else:
-        print(f"  channel:      {default_channel}")
+        print(f"  channel:      {channel}")
     print()
     print("Next:")
-    if remote:
-        print("  llmstack start     # verify remote + drop into the client subshell")
+    if remote is not None:
+        print("  llmstack start     # re-fetch /models.ini + drop into the client subshell")
     else:
         print("  llmstack start     # generate llama-swap.yaml + bring up the stack")
         print("  llmstack check     # snapshot configured GGUFs + drift check")

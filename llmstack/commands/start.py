@@ -1,32 +1,41 @@
 """``llmstack start`` -- bring up the stack and enter the env-prepared subshell.
 
-Two top-level modes:
+The channel is **decided at install time** and persisted to
+``.llmstack/default-channel`` -- ``start`` reads that marker and never
+re-derives the channel from the environment. Three channels exist:
 
-  *Local mode* (default)
+  *Local* (``current`` / ``next``)
     Generate ``llama-swap.yaml`` for the chosen channel, launch
     llama-swap + the FastAPI router locally, and drop into a subshell
     with ``OPENCODE_CONFIG`` exported. The yaml is regenerated on every
     fresh launch so it always reflects the live ``models.ini``; if the
-    daemons are already up we leave their loaded yaml alone.
+    daemons are already up under our pid files we leave the loaded yaml
+    alone. The ``--current`` / ``--next`` flags pick which of the two
+    local channels to launch *for this run* (without rewriting the
+    marker -- only ``install`` does that).
 
-    Channel resolution (highest priority first):
-      1. explicit ``--current`` / ``--next`` on the command line
-      2. ``.llmstack/default-channel`` pinned by the last ``install``
-      3. hard-coded fallback: ``current``
+    Daemon state has two branches:
+      (a) local pid file says daemons are up   -> idempotent, channel-checked,
+                                                  no yaml regeneration
+      (b) nothing in the pid file              -> regenerate yaml, launch
+                                                  fresh. If port :10102 is
+                                                  already in use by *another*
+                                                  process (typically another
+                                                  project on this host) we
+                                                  refuse: the user should
+                                                  ``llmstack install --external``
+                                                  to wire this project as a
+                                                  thin client of those
+                                                  daemons, or stop them
+                                                  first.
 
-    Daemon state has three branches:
-      (a) local pid file says daemons are up      -> idempotent, channel-checked,
-                                                     no yaml regeneration
-      (b) port 10102 responds but no local pid    -> daemons started by
-                                                     another project on this
-                                                     host; reuse them.
-                                                     Channel label: **shared**.
-      (c) nothing                                 -> regenerate yaml, launch fresh
-
-  *Remote / client mode* -- when ``$LLMSTACK_REMOTE_URL`` is set
-    Don't launch anything; verify the remote ``/health`` endpoint is
+  *External* (``external``)
+    Don't launch anything; verify the marker's ``/health`` endpoint is
     reachable and drop into the subshell with ``LLMSTACK_CHANNEL=external``.
-    Useful for laptops talking to a beefy desktop's llmstack.
+    The URL was pinned by ``llmstack install --external [URL]``; an
+    external install with no URL defaults to the local router
+    (``http://127.0.0.1:10101``), which is the laptop-with-N-projects
+    case where one project owns the daemons and the others are clients.
 """
 
 from __future__ import annotations
@@ -46,13 +55,12 @@ from llmstack.generators import render_to
 from llmstack.generators.llama_swap import render as render_yaml
 from llmstack.generators.llama_swap import validate as validate_yaml
 from llmstack.paths import (
+    DEFAULT_REMOTE_URL,
     ROUTER_PORT,
     SWAP_PORT,
     ChannelMark,
     ensure_state_dirs,
-    is_remote,
     read_marker,
-    remote_url,
     write_marker,
 )
 from llmstack.shell_env import spawn_subshell
@@ -73,23 +81,36 @@ def _queued_next_tiers() -> list[str]:
     return sorted(t.name for t in load_tiers().values() if t.has_next)
 
 
-def _start_remote(detach: bool) -> int:
-    """Client-mode start: just verify the remote and drop into the shell."""
+def _start_remote(detach: bool, url: str) -> int:
+    """Client-mode start: just verify the remote and drop into the shell.
+
+    ``url`` is the remote-router base URL pinned by ``install --external``
+    into ``default-channel``. It is *not* re-derived from the environment
+    here -- the marker is canonical post-install, and silently following
+    a stale env var would lie to the user about which remote opencode is
+    actually wired to (the URL is baked into ``opencode.json`` at install
+    time).
+
+    The reachability probe hits ``GET /models.ini`` rather than a
+    dedicated ``/health`` endpoint -- a 200 there proves both that the
+    router is up and that it actually has a config worth talking to,
+    which is what the thin client needs. The router has no separate
+    ``/health`` route.
+    """
     paths = ensure_state_dirs()
-    url = remote_url()
-    assert url is not None  # guarded by caller
 
     if not paths.opencode_json.is_file():
         raise SystemExit(
-            f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install\n"
-            f"    (with LLMSTACK_REMOTE_URL={url} so opencode is wired to the remote)"
+            f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install --external\n"
+            f"    (or `llmstack install --external {url}` to keep this remote URL)"
         )
 
-    print(f"[*] remote llmstack: {url}")
-    if port_responds(f"{url}/health", timeout=5.0):
-        print(f"[OK] {url}/health responds.")
+    print(f"[*] external llmstack: {url}")
+    probe_url = f"{url}/models.ini"
+    if port_responds(probe_url, timeout=5.0):
+        print(f"[OK] {probe_url} responds.")
     else:
-        print(f"[!] {url}/health did not respond -- is the remote stack up?", file=sys.stderr)
+        print(f"[!] {probe_url} did not respond -- is the remote stack up?", file=sys.stderr)
         print("    proceeding anyway; opencode will surface the error on first request.", file=sys.stderr)
 
     write_marker(paths.active_marker, ChannelMark("external", url))
@@ -97,14 +118,14 @@ def _start_remote(detach: bool) -> int:
     print()
     print("[OK] client mode (channel: external).")
     print()
-    print(f"  router       {url}     (remote)")
+    print(f"  router       {url}     (external)")
     print()
     print("Try:")
     print(f"  curl -s {url}/v1/models | jq '.data[].id'")
-    print(f"  curl -s {url}/health | jq '.tiers'")
+    print(f"  curl -s {url}/models.ini | head")
     print()
     print("Disconnect:")
-    print("  exit                # leave the subshell (daemons are remote, nothing to stop)")
+    print("  exit                # leave the subshell (daemons are external, nothing to stop)")
 
     if detach:
         return 0
@@ -128,13 +149,13 @@ def _start_remote(detach: bool) -> int:
 
 
 def run(args: list[str]) -> int:
-    channel: str | None = None
+    requested: str | None = None
     detach = False
     for arg in args:
         if arg == "--next":
-            channel = "next"
+            requested = "next"
         elif arg == "--current":
-            channel = "current"
+            requested = "current"
         elif arg in ("--detach", "--no-shell"):
             detach = True
         elif arg in ("-h", "--help"):
@@ -144,26 +165,28 @@ def run(args: list[str]) -> int:
             print(f"[!] unknown arg to start: {arg} (try --next, --current, --detach, -h)")
             return 2
 
-    if is_remote():
-        if channel is not None:
+    paths = ensure_state_dirs()
+    default = read_marker(paths.default_marker)
+
+    # External installs short-circuit to the thin-client path. The URL
+    # is taken from the marker (set by ``install --external``); we
+    # never re-derive it from the env.
+    if default and default.channel == "external":
+        if requested is not None:
             print(
-                "[!] --current / --next are local-mode flags and have no effect when "
-                "LLMSTACK_REMOTE_URL is set; the remote picks the channel.",
+                "[!] --current / --next have no effect for external installs "
+                "(no daemons to launch).",
                 file=sys.stderr,
             )
-        return _start_remote(detach)
+        url = (default.url or "").rstrip("/") or DEFAULT_REMOTE_URL
+        return _start_remote(detach, url)
 
-    paths = ensure_state_dirs()
-
-    if channel is None:
-        default = read_marker(paths.default_marker)
-        # `external` in default-channel means the user previously installed
-        # this project in remote mode -- but if they got here without
-        # LLMSTACK_REMOTE_URL set, fall through to "current" rather than
-        # silently picking up a stale URL.
-        if default and default.channel in ("current", "next"):
-            channel = default.channel
-    if not channel:
+    # Local mode -- decide which of current/next to launch.
+    if requested is not None:
+        channel = requested
+    elif default and default.channel in ("current", "next"):
+        channel = default.channel
+    else:
         channel = "current"
 
     if not paths.llama_swap_bin.exists() or not os.access(paths.llama_swap_bin, os.X_OK):
@@ -171,12 +194,10 @@ def run(args: list[str]) -> int:
     if not paths.opencode_json.is_file():
         raise SystemExit(f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install")
 
-    launch_daemons = True
-    shared_daemons = False
     if is_running(paths.swap_pid):
         launch_daemons = False
         live_mark = read_marker(paths.active_marker)
-        live = live_mark.channel if live_mark else "current"
+        live = live_mark.channel if live_mark else channel
         if live != channel:
             print(
                 f"[!] llama-swap is already running in '{live}' channel; "
@@ -187,10 +208,30 @@ def run(args: list[str]) -> int:
             print(f"      llmstack start --{channel}\n", file=sys.stderr)
             return 1
     elif port_responds(f"http://127.0.0.1:{SWAP_PORT}/health"):
-        launch_daemons = False
-        shared_daemons = True
-        print(f"[*] daemons already up on :{ROUTER_PORT}/:{SWAP_PORT} (started by another project on this host)")
-        print("    will reuse them. Use 'llmstack stop' from any project to stop.")
+        # Something is already listening on :10102, but it isn't ours
+        # (no pid file in this project's state dir). The pre-flag flow
+        # silently joined as "shared", which was a footgun: a `stop`
+        # from this project would tear down the other project's
+        # daemons and we couldn't bring them back without local
+        # tooling. Instead, refuse and tell the user how to wire this
+        # project as a proper thin client.
+        print(
+            f"[!] port :{SWAP_PORT} is already in use (daemons started by "
+            "another project on this host).",
+            file=sys.stderr,
+        )
+        print("    This project is installed for local mode -- it expects to own", file=sys.stderr)
+        print("    those daemons. To run as a thin client of the running stack:", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("        llmstack install --external", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("    (--external defaults to http://127.0.0.1:10101, the local router.)", file=sys.stderr)
+        print("    To take over instead, stop the running daemons first:", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("        llmstack stop && llmstack start", file=sys.stderr)
+        return 1
+    else:
+        launch_daemons = True
 
     if launch_daemons:
         if channel == "next":
@@ -216,10 +257,7 @@ def run(args: list[str]) -> int:
             validate=validate_yaml,
         )
 
-    if shared_daemons:
-        print("[*] channel: shared (whatever the running daemons were started with)")
-    else:
-        print(f"[*] channel: {channel}  ({paths.llama_swap_yaml.name})")
+    print(f"[*] channel: {channel}  ({paths.llama_swap_yaml.name})")
 
     if launch_daemons:
         print(f"[*] starting llama-swap on :{SWAP_PORT}")
@@ -264,22 +302,21 @@ def run(args: list[str]) -> int:
             paths.router_pid.unlink(missing_ok=True)
             return 1
         print(f"    pid {read_pid(paths.router_pid)}")
-    elif not shared_daemons:
+    else:
         print(f"[=] llama-swap already running (pid {read_pid(paths.swap_pid)}, channel {channel})")
         if is_running(paths.router_pid):
             print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
 
     other = "next" if channel == "current" else "current"
-    channel_label = "shared" if shared_daemons else channel
     print()
-    print(f"[OK] stack is up (channel: {channel_label}).")
+    print(f"[OK] stack is up (channel: {channel}).")
     print()
     print(f'  router       http://127.0.0.1:{ROUTER_PORT}     (OpenAI-compatible, "auto" routing)')
     print(f"  llama-swap   http://127.0.0.1:{SWAP_PORT}     (raw model endpoints + UI)")
     print()
     print("Try:")
     print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/v1/models | jq '.data[].id'")
-    print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/health | jq '.tiers'")
+    print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/models.ini | head")
     print()
     print("Logs:")
     print(f"  tail -f {paths.log_dir}/llama-swap.log")

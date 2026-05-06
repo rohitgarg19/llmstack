@@ -1,18 +1,21 @@
 """``llmstack status`` -- show channel, pids, ``/v1/models``, llama-server load.
 
-Three states the channel can be in:
+The channel comes from ``.llmstack/default-channel`` (pinned by
+``install``). Two top-level reporting paths:
 
-  * ``current`` / ``next``        -- local stack we (or another project on
-                                     this host) own. Pid files + port
-                                     probes both relevant.
-  * ``shared``                    -- local daemons running but no pid file
-                                     in this project's ``.llmstack/`` --
-                                     i.e. another project on the same host
-                                     started them.
-  * ``external``                  -- ``$LLMSTACK_REMOTE_URL`` is set; we
-                                     are a thin client of a remote stack.
-                                     Skip all local checks; just probe the
-                                     remote.
+  * ``current`` / ``next``  -- local install. Check pid files + port
+                               probes for our daemons. If port :10102
+                               responds without a pid file in *this*
+                               project's ``.llmstack/``, the daemons
+                               belong to another project on this host;
+                               we report that as "(other)" so the user
+                               knows the local daemons aren't ours --
+                               it's not an error, but also not
+                               something this project can ``stop``
+                               cleanly.
+  * ``external``            -- thin-client install. Skip all local
+                               checks; probe the remote-router URL
+                               from the marker.
 """
 
 from __future__ import annotations
@@ -28,11 +31,10 @@ import yaml
 from llmstack._platform import IS_WINDOWS
 from llmstack.commands._helpers import is_running, pgrep, port_responds, read_pid
 from llmstack.paths import (
+    DEFAULT_REMOTE_URL,
     ROUTER_PORT,
     SWAP_PORT,
-    is_remote,
     read_marker,
-    remote_url,
     resolve,
 )
 
@@ -42,6 +44,16 @@ def _print_help() -> None:
 
 
 def _check_local(name: str, url: str) -> None:
+    """Report on a local daemon (router/llama-swap).
+
+    ``alive`` (we own the process via pid file) is the happy path.
+    ``responds`` without ``alive`` means the port is in use but the
+    process isn't ours -- another project on this host owns it. We
+    surface that as ``(other)`` rather than ``shared`` because there's
+    no special "shared" mode anymore: a local install can't manage
+    daemons it didn't spawn. ``llmstack install --external`` is the
+    documented way to consume those daemons cleanly.
+    """
     paths = resolve()
     pid_file = paths.state_dir / f"{name}.pid"
     pid = read_pid(pid_file) if pid_file.is_file() else None
@@ -51,7 +63,7 @@ def _check_local(name: str, url: str) -> None:
     if alive:
         status = f"pid {pid:<7}"
     elif responds:
-        status = "shared"
+        status = "(other)"
     else:
         status = "DOWN"
     suffix = f"OK {url}" if responds else f"no response @ {url}"
@@ -139,13 +151,12 @@ def _list_models(base: str) -> None:
         print(f"  (no response @ {base}/v1/models)")
 
 
-def _print_remote_status(paths) -> int:
-    url = remote_url()
-    assert url is not None
+def _print_remote_status(paths, url: str) -> int:
     print(f"stack status (channel: external -- remote {url}):")
     print(f"  work dir      {paths.work_dir}")
-    responds = port_responds(f"{url}/health", timeout=3.0)
-    suffix = f"OK {url}/health" if responds else f"no response @ {url}/health"
+    probe = f"{url}/models.ini"
+    responds = port_responds(probe, timeout=3.0)
+    suffix = f"OK {probe}" if responds else f"no response @ {probe}"
     status = "external" if responds else "DOWN"
     print(f"  {'router':<12} {status:<11}  {suffix}")
 
@@ -177,22 +188,32 @@ def run(args: list[str]) -> int:
 
     paths = resolve()
 
-    if is_remote():
-        return _print_remote_status(paths)
+    # Channel decision is pinned at install time; status just reads it.
+    # active-channel (set by `start`) takes precedence over default-channel
+    # (set by `install`) so a `start --next` run is reflected immediately.
+    default = read_marker(paths.default_marker)
+    active = read_marker(paths.active_marker)
+    persisted = active or default
 
-    mark = read_marker(paths.active_marker)
-    if mark:
-        channel = mark.channel
-        if mark.url:
-            channel = f"{channel} (remote: {mark.url})"
+    if persisted and persisted.channel == "external":
+        url = (persisted.url or "").rstrip("/") or DEFAULT_REMOTE_URL
+        return _print_remote_status(paths, url)
+
+    if active:
+        channel = active.channel
+    elif default and default.channel in ("current", "next"):
+        channel = f"{default.channel} (or stopped)"
     elif port_responds(f"http://127.0.0.1:{SWAP_PORT}/health"):
-        channel = "shared (started by another project on this host)"
+        channel = "(other) -- daemons running on :10102 are not ours"
     else:
         channel = "current (or stopped)"
 
     print(f"stack status (channel: {channel}):")
     print(f"  work dir      {paths.work_dir}")
-    _check_local("router", f"http://127.0.0.1:{ROUTER_PORT}/health")
+    # Router has no /health route (dropped in v3.x); /v1/models always
+    # 200s on a live router. llama-swap is a separate binary with its
+    # own /health endpoint -- leave that one alone.
+    _check_local("router", f"http://127.0.0.1:{ROUTER_PORT}/v1/models")
     _check_local("llama-swap", f"http://127.0.0.1:{SWAP_PORT}/health")
 
     print()
@@ -227,13 +248,13 @@ def run(args: list[str]) -> int:
                 md = m.get("metadata") or {}
                 if md.get("channel") != "next":
                     continue
-                active = "?"
+                hff = "?"
                 for line in (m.get("cmd") or "").splitlines():
                     s = line.strip()
                     if s.startswith("-hff ") and not s.lstrip().startswith("#"):
-                        active = s[len("-hff "):].strip()
+                        hff = s[len("-hff "):].strip()
                         break
-                print(f"  {name:<18}  -> {active}  ({md.get('quant', '?')}, {md.get('size_gb', '?')} GB)")
+                print(f"  {name:<18}  -> {hff}  ({md.get('quant', '?')}, {md.get('size_gb', '?')} GB)")
         except (OSError, yaml.YAMLError):
             pass
     return 0

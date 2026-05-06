@@ -110,14 +110,17 @@ shell`) drop you into a subshell with these env vars exported:
 | Env var | Value |
 |---|---|
 | `OPENCODE_CONFIG` | `<work-dir>/.llmstack/opencode.json` (overrides global, sits below project configs) |
-| `LLMSTACK_CHANNEL` | `current`, `next`, `external` (thin client of a remote llmstack, see below), or `shared` (local daemons started by another project) |
+| `LLMSTACK_CHANNEL` | `current`, `next`, or `external` (thin client of an llmstack router, see below) |
 | `LLMSTACK_ACTIVE` | `1` (used to refuse recursive entry) |
 | `LLMSTACK_ROOT` | absolute path to the installed `llmstack` package |
 
-The llama-swap and router daemons are singleton on ports 10101/10102 and
-**shared across projects**: `start` from a second project notices the
-running daemons and reuses them rather than fighting for the ports;
-`stop` from any project tears them down.
+The llama-swap and router daemons are singleton on ports 10101/10102.
+The channel is **pinned at install time** in `.llmstack/default-channel`
+and never auto-detected at runtime — one project on the host owns the
+daemons (installed local), and any other project on the same host that
+wants to consume them is installed `--external` (defaulting to
+`http://127.0.0.1:10101`). This avoids the footgun where a "shared"
+project's `stop` would tear down daemons it can't bring back up.
 
 The shell's prompt is prefixed with `[llmstack:<channel>]` so you always
 know whether you're in the env or not. Bash and zsh source your normal
@@ -247,6 +250,7 @@ eval "$(llmstack activate zsh)"
 # 5. Sanity check (works from any terminal)
 llmstack status
 curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
+curl -s http://127.0.0.1:10101/models.ini | head    # what thin clients see
 ```
 
 To stop everything: `llmstack stop`.
@@ -294,42 +298,70 @@ Notes:
 - Stopping daemons uses `taskkill /T /F` under the hood, so the
   llama-server children get cleaned up as well.
 
-### Thin-client mode (connect to a remote llmstack)
+### Thin-client mode (`--external`)
 
-Set `LLMSTACK_REMOTE_URL` to the router URL of another machine running
-llmstack and this host stops launching anything locally — no llama-swap,
-no router, no GGUFs needed. `install` generates an `opencode.json` whose
-`baseURL` points at the remote, and `start` just verifies `/health` and
-drops you into the client subshell:
+`llmstack install --external [URL]` wires this project as a thin client
+of an llmstack router — no llama-swap, no router, no GGUFs needed
+locally, and **no local `models.ini`**. The thin-client install:
+
+1. Fetches `GET URL/models.ini` live from the router (this also
+   doubles as the health check — a 200 with valid INI proves the
+   router is up).
+2. Renders `opencode.json` against the fetched content so tier names
+   + descriptions agree with what the router actually serves.
+3. Pins `.llmstack/default-channel = "external <url>"` so subsequent
+   commands know they're in client mode.
+
+There is no client-side cache: every `install` re-fetches. To pick up
+a tier edit on the router, just re-run `llmstack install` here.
+
+URL precedence at install time: `--external <url>` arg > `$LLMSTACK_REMOTE_URL`
+env var > the local router (`http://127.0.0.1:10101`). You normally
+don't set the env var yourself — the activate hook does it for you
+when you `cd` into an external-installed project (see below).
+
+Two flavours of the same mode:
+
+**Same host, two projects.** One project owns the daemons (local
+install), the others are thin clients of localhost. Zero config:
+
+```bash
+# project A — owns the daemons
+cd ~/projA && llmstack install && llmstack start
+
+# project B — consumes them
+cd ~/projB && llmstack install --external
+                              # baseURL = http://127.0.0.1:10101/v1
+                              # default-channel = "external http://127.0.0.1:10101"
+                              # (no local models.ini -- fetched from project A's router)
+llmstack start                # verifies /models.ini, drops into the client subshell
+```
+
+**Different host.** Point at a beefy desktop's router from a laptop:
 
 ```bash
 # laptop -> desktop running llmstack on 10.0.0.5
-export LLMSTACK_REMOTE_URL=http://10.0.0.5:10101
-
-llmstack install      # writes .llmstack/opencode.json (baseURL = remote/v1)
-                      # and .llmstack/default-channel = "external <url>"
-                      # (no llama-swap.yaml -- the remote owns that)
-llmstack start        # verifies http://10.0.0.5:10101/health
-                      # (with the activate hook installed, your prompt
-                      # is already medium-purple with the URL:
-                      #   [llmstack:opencode http://10.0.0.5:10101])
-opencode              # talks straight to the remote router
+llmstack install --external http://10.0.0.5:10101
+llmstack start               # verifies http://10.0.0.5:10101/models.ini
+opencode                     # talks straight to the remote router
 ```
+
+(`LLMSTACK_REMOTE_URL=http://10.0.0.5:10101 llmstack install` also
+works — the env var is honoured as an alternative way in.)
 
 The URL is persisted into the channel marker, so any new terminal you
 open with the activate hook installed (`eval "$(llmstack activate zsh)"`)
 will re-export `LLMSTACK_REMOTE_URL` automatically when you `cd` into
-the project — no need to repeat the `export` in every shell.
+the project. The prompt is medium-purple with the URL:
+`[llmstack:<project> http://10.0.0.5:10101]`. From inside that
+activated shell, `llmstack install` re-fetches `models.ini` without
+needing the flag or URL again.
 
 The local commands that manage local resources (`setup`, `download`,
-`install-llama-swap`) refuse when `LLMSTACK_REMOTE_URL` is set.
+`install-llama-swap`) refuse when the project is installed `--external`.
 `stop` is a no-op (nothing local to tear down) — to stop the daemons
-themselves, run `llmstack stop` on the host that started them.
-
-You typically also want a copy of the same `models.ini` the remote was
-configured with, so the generated tier names + agent wiring match what
-the remote actually serves. (The router decides which tier handles a
-request; the client just provides hints.)
+themselves, run `llmstack stop` from the project that owns them (the
+one installed local).
 
 ### Auto-activate per project
 
@@ -350,8 +382,9 @@ eval "$(llmstack activate bash)"
 With the hook installed, `cd` into any project that has a `.llmstack/`
 and your shell is wired up automatically — `OPENCODE_CONFIG`,
 `LLMSTACK_WORK_DIR`, `LLMSTACK_CHANNEL` (and `LLMSTACK_REMOTE_URL` for
-external projects) all toggle on/off as you walk in and out. There is
-no separate `llmstack shell` command — this is the shell command.
+projects installed `--external`) all toggle on/off as you walk in and
+out. There is no separate `llmstack shell` command — this is the shell
+command.
 
 ### Common partial flows
 
@@ -401,11 +434,17 @@ curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: applicatio
 
 The router exposes:
 
-- `GET  /health`                ← includes the resolved tier names
+- `GET  /models.ini`            ← raw config text (used by `install --external` and as the health check)
 - `GET  /v1/models`             ← injects `auto` then proxies the rest
 - `POST /v1/chat/completions`   ← classify if `model=="auto"`, then proxy
 - `POST /v1/completions`        ← same
 - `*`                           ← pass-through reverse proxy
+
+There is no `/health` route on the router — `GET /models.ini`
+returning a 200 + valid INI is the canonical "router is up and
+configured" signal. (Hitting `/health` still works for legacy curl
+users, but it's just the catch-all proxying through to llama-swap's
+own `/health` endpoint.)
 
 ## Memory math (M4 Max / 64 GB)
 

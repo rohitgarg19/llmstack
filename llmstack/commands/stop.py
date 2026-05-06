@@ -9,9 +9,9 @@ Three layers, in order:
   3. ``pkill`` any orphaned ``llama-server`` children spawned by
      llama-swap.
 
-In **remote mode** (``$LLMSTACK_REMOTE_URL`` set) there are no local
-daemons to tear down -- we just clear the active-channel marker so
-``status`` no longer reports the connection.
+In **external mode** (channel pinned to ``external`` by ``install``)
+there are no local daemons to tear down -- we just clear the
+active-channel marker so ``status`` no longer reports the connection.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def run(args: list[str]) -> int:
             paths.active_marker.unlink(missing_ok=True)
             print(f"[OK] disconnected from {url} (active-channel cleared).")
         else:
-            print(f"[=] not connected to any remote llmstack. ($LLMSTACK_REMOTE_URL={url})")
+            print(f"[=] not connected to any remote llmstack. (external URL: {url})")
         print("    note: nothing local was running. To stop the *remote* daemons, run")
         print("          'llmstack stop' on the host that started them.")
         return 0

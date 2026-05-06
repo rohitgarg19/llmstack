@@ -10,6 +10,28 @@ Behaviour:
                                               ``auto`` entry and any
                                               hosted (e.g. bedrock) tiers
                                               declared in ``models.ini``.
+* ``GET /models.ini``                      -> raw text of the router's
+                                              ``models.ini``. Thin
+                                              clients (``llmstack
+                                              install --external``)
+                                              fetch this on every
+                                              install and use it to
+                                              regenerate
+                                              ``opencode.json`` without
+                                              keeping a local copy of
+                                              the file. Returning a
+                                              200 + valid INI doubles
+                                              as the canonical health
+                                              check for external
+                                              clients -- there is no
+                                              separate ``/health``
+                                              route on the router (the
+                                              catch-all proxies any
+                                              such request through to
+                                              llama-swap's own
+                                              ``/health`` for
+                                              backwards-compat curl
+                                              users).
 * ``POST /v1/chat/completions``,
   ``POST /v1/completions``
     - if request body ``model == "auto"`` (or unset), classify the request
@@ -94,8 +116,9 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+from llmstack.paths import models_ini_path
 from llmstack.tiers import Tier, load_tiers
 
 UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
@@ -389,28 +412,47 @@ async def _stream_proxy(method: str, path: str, body: bytes, headers: dict[str, 
 
 # --------------------------------- routes ----------------------------------
 
-@app.get("/health")
-async def health() -> dict[str, Any]:
-    assert client is not None
+@app.get("/models.ini")
+async def serve_models_ini() -> Response:
+    """Return the router's live ``models.ini`` as text.
+
+    Read fresh on every request rather than from the cached
+    :data:`TIERS` snapshot -- a thin client running
+    ``llmstack install --external`` against this router should see
+    whatever the operator has most recently written to disk, even if
+    the router hasn't been restarted to pick up a re-parse. (Stale
+    ``TIERS`` only affects in-flight routing decisions; the file on
+    disk is the source of truth for downstream config generation.)
+
+    Returning the file is also how external clients health-check the
+    router: a 200 with a non-empty INI body proves both that the
+    router process is up and that the operator has a usable config
+    here -- which is exactly what the client needs to render its
+    own ``opencode.json``. There is no separate ``/health`` route.
+    """
+    path = models_ini_path()
+    if not path.is_file():
+        # Router is up but the operator hasn't pointed it at a
+        # models.ini yet (or the file went missing). Fail loud so the
+        # thin-client install surfaces a real error message instead of
+        # rendering an empty opencode.json.
+        return PlainTextResponse(
+            f"models.ini not found at {path} on the router host.\n"
+            "Set $LLMSTACK_MODELS_INI on the router or run "
+            "`llmstack install` there to seed the default.\n",
+            status_code=404,
+            media_type="text/plain",
+        )
     try:
-        r = await client.get("/health", timeout=5.0)
-        upstream_ok = r.status_code == 200
-    except Exception as e:  # pragma: no cover
-        upstream_ok = False
-        log.warning("upstream health failed: %s", e)
-    return {
-        "router": "ok",
-        "upstream_ok": upstream_ok,
-        "upstream": UPSTREAM,
-        "tiers": {
-            "fast": FAST_MODEL,
-            "agent": AGENT_MODEL,
-            "ultra": ULTRA_MODEL if _ultra_available() else None,
-            "plan": PLAN_MODEL,
-            "uncensored": UNCENSORED_MODEL,
-        },
-        "bedrock_tiers": [t.name for t in TIERS.values() if t.is_bedrock],
-    }
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("failed to read %s for /models.ini: %s", path, e)
+        return PlainTextResponse(
+            f"failed to read {path}: {e}\n",
+            status_code=500,
+            media_type="text/plain",
+        )
+    return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/v1/models")

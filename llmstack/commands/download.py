@@ -19,8 +19,8 @@ def run(args: list[str]) -> int:
         return 2
 
     if is_remote():
-        print(f"[!] LLMSTACK_REMOTE_URL is set ({remote_url()}); GGUFs live on the remote.")
-        print("    `llmstack download` is a local-only command.")
+        print(f"[!] this project is wired as a thin client of {remote_url()} (channel: external);")
+        print("    GGUFs live on the remote. `llmstack download` is a local-only command.")
         return 1
 
     download_all()

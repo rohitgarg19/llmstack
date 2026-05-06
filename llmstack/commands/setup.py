@@ -45,10 +45,10 @@ def run(args: list[str]) -> int:
             return 2
 
     if is_remote():
-        print(f"[!] LLMSTACK_REMOTE_URL is set ({remote_url()}); setup is local-only.")
+        print(f"[!] external mode is in effect ({remote_url()}); setup is local-only.")
         print("    in client mode you only need:")
-        print("      llmstack install      # generate .llmstack/opencode.json (points at remote)")
-        print("      llmstack start        # verify remote + enter the client subshell")
+        print("      llmstack install --external      # generate .llmstack/opencode.json (points at remote)")
+        print("      llmstack start                   # verify remote + enter the client subshell")
         return 1
 
     if not skip_download:

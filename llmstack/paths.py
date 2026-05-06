@@ -47,34 +47,58 @@ ROUTER_HOST = "127.0.0.1"
 ROUTER_PORT = 10101
 SWAP_PORT = 10102
 
+# Default thin-client target: the local router on this host. Picked up by
+# ``llmstack install --external`` when no URL is given. Match this to
+# ``ROUTER_HOST`` / ``ROUTER_PORT`` so a host-local thin client and the
+# (potential) local owner of the daemons agree on the endpoint.
+DEFAULT_REMOTE_URL = f"http://{ROUTER_HOST}:{ROUTER_PORT}"
 
-def remote_url() -> str | None:
-    """Base URL of a *remote* llmstack router (router endpoint, no ``/v1``).
 
-    When set via ``LLMSTACK_REMOTE_URL`` the stack runs in **client mode**:
+def env_remote_url() -> str | None:
+    """``LLMSTACK_REMOTE_URL`` from the environment, if set.
 
-      - no daemons are launched (no llama-swap, no router)
-      - no GGUFs / binaries need to live on this host
-      - ``opencode.json`` is generated with ``baseURL`` pointing at the
-        remote router instead of ``http://127.0.0.1:10101/v1``
-      - ``LLMSTACK_CHANNEL`` is exported as ``external``
-
-    Returns ``None`` (= local mode) when the env var is unset or empty.
-    Trailing slashes are stripped so callers can build URLs by simple
-    concatenation (``f"{remote_url()}/health"``).
+    This is an *input* to ``llmstack install`` (and a one-shot fallback for
+    pre-install commands like ``setup``); it is **not** the source of
+    truth post-install. The activate hook re-exports the URL from the
+    persisted channel marker into this env var, so reading it from a
+    hook-active shell happens to agree with the marker -- but the marker
+    is canonical.
     """
     raw = (os.environ.get("LLMSTACK_REMOTE_URL") or "").strip().rstrip("/")
     return raw or None
 
 
+def remote_url() -> str | None:
+    """Authoritative remote-router URL (with no trailing slash, no ``/v1``).
+
+    Resolution order:
+
+      1. ``default-channel`` marker, when channel == ``external`` (set by
+         ``llmstack install --external``). This is the post-install
+         source of truth.
+      2. ``$LLMSTACK_REMOTE_URL`` env var. Used only as a fallback for
+         commands invoked *before* an external install has happened
+         (``setup``, ``install`` itself).
+
+    Returns ``None`` when neither says we're in external mode -- i.e. we
+    own (or will own) the local daemons.
+    """
+    try:
+        paths = resolve()
+        mark = read_marker(paths.default_marker)
+    except OSError:
+        mark = None
+    if mark and mark.channel == "external" and mark.url:
+        return mark.url.rstrip("/") or None
+    return env_remote_url()
+
+
 def is_remote() -> bool:
-    """Convenience wrapper around :func:`remote_url`."""
+    """``True`` iff this project is wired as a thin client of some router.
+
+    Thin-wraps :func:`remote_url`; see there for the resolution order.
+    """
     return remote_url() is not None
-
-
-def router_health_url() -> str:
-    """Where to probe for ``/health`` -- remote URL when set, else localhost."""
-    return f"{remote_url() or f'http://{ROUTER_HOST}:{ROUTER_PORT}'}/health"
 
 
 def _xdg_data_home() -> Path:
@@ -244,11 +268,11 @@ def ensure_models_ini() -> tuple[Path, bool]:
 #
 #     <channel>[ <url>]\n
 #
-# For local channels (``current`` / ``next`` / ``shared``) the line is just
-# the channel name. For ``external`` we append the remote llmstack URL so
-# the activate hook can re-export ``LLMSTACK_REMOTE_URL`` without the user
-# having to set it in their shell rc -- entering a project is enough to
-# wire the env back up.
+# For local channels (``current`` / ``next``) the line is just the
+# channel name. For ``external`` we append the remote llmstack URL so
+# the activate hook can re-export ``LLMSTACK_REMOTE_URL`` without the
+# user having to set it in their shell rc -- entering a project is
+# enough to wire the env back up.
 #
 # The format is deliberately whitespace-separated (not JSON / TSV) so a
 # shell can parse it with ``read -r channel url < marker`` -- no jq, no

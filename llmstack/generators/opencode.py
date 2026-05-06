@@ -109,16 +109,52 @@ def _int(value: str, default: int) -> int:
     return int(m.group()) if m else default
 
 
-def build_config(ini_path: Path | None = None) -> dict:
-    path = ini_path or models_ini_path()
-    if not path.exists():
-        raise SystemExit(f"models.ini not found at {path}")
+def build_config(
+    ini_path: Path | None = None,
+    *,
+    ini_text: str | None = None,
+    remote: str | None = None,
+) -> dict:
+    """Build the opencode.json dict from ``models.ini``.
+
+    Source of the INI is one of (mutually exclusive):
+
+      * ``ini_text`` -- raw INI content as a string. Used by
+        ``llmstack install --external``: it fetches ``models.ini``
+        straight from the router (``GET /models.ini``) and renders the
+        opencode config without writing the file to disk. Thin clients
+        don't keep a local copy of ``models.ini`` -- they re-fetch it
+        on each ``install``.
+      * ``ini_path`` -- explicit path. Used by callers that have a
+        ``Path`` in hand (``check_models``, tests).
+      * neither -- read from :func:`models_ini_path` (canonical
+        per-project location, the local-mode default).
+
+    ``remote`` overrides the router base URL: when given, opencode is
+    pointed at ``{remote}/v1`` (thin-client / external mode). When
+    ``None``, fall back to :func:`llmstack.paths.remote_url` -- which
+    reads the persisted channel marker first, env var second -- and
+    finally to the local router host/port from ``models.ini``.
+
+    Passing ``remote`` explicitly is what ``llmstack install --external
+    [URL]`` does: it has just *decided* the URL from flags + env and
+    needs the renderer to honour that decision rather than looking
+    again at a possibly-stale marker.
+    """
+    if ini_text is not None and ini_path is not None:
+        raise ValueError("build_config: pass ini_text OR ini_path, not both")
 
     cfg = configparser.ConfigParser(inline_comment_prefixes=(";",), interpolation=None)
-    cfg.read(path)
+    if ini_text is not None:
+        cfg.read_string(ini_text)
+    else:
+        path = ini_path or models_ini_path()
+        if not path.exists():
+            raise SystemExit(f"models.ini not found at {path}")
+        cfg.read(path)
 
     defaults = cfg["DEFAULT"]
-    rurl = remote_url()
+    rurl = remote if remote is not None else remote_url()
     if rurl:
         # Client mode: send all traffic to the remote router. Keep the
         # tier / agent wiring derived from the local models.ini -- the
@@ -227,9 +263,13 @@ def build_config(ini_path: Path | None = None) -> dict:
     return out
 
 
-def render() -> str:
-    """Return the full opencode.json text (with trailing newline)."""
-    return json.dumps(build_config(), indent=2) + "\n"
+def render(*, ini_text: str | None = None, remote: str | None = None) -> str:
+    """Return the full opencode.json text (with trailing newline).
+
+    ``ini_text`` and ``remote`` are forwarded to :func:`build_config`;
+    see there for the resolution order.
+    """
+    return json.dumps(build_config(ini_text=ini_text, remote=remote), indent=2) + "\n"
 
 
 def validate(path: Path) -> None:

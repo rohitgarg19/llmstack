@@ -37,13 +37,36 @@ Actions:
       First-time walkthrough: kick off GGUF downloads, wait for them, install
       the llama-swap binary, print the shell activation hook, check opencode.
 
-  install [--print] [--current | --next]
-      Regenerate .llmstack/opencode.json (+ AGENTS.md copy) from models.ini
-      and pin the default channel for the next `start`. Seeds a default
-      models.ini in the work-dir on first run if none exists. --print
-      writes the opencode config to stdout instead of files. Note:
-      llama-swap.yaml is NOT touched here -- `start` owns that and
-      regenerates it for the chosen channel on each launch.
+  install [--print] [--current | --next | --external [URL]]
+      Regenerate .llmstack/opencode.json (+ AGENTS.md copy) and pin
+      the default channel for the next `start`. The source of tier
+      config depends on channel:
+
+        --current / --next (local)
+          Read <work-dir>/.llmstack/models.ini, seeding it from the
+          bundled template on first run. llama-swap.yaml is NOT
+          touched -- `start` owns that and regenerates it for the
+          chosen channel on each launch.
+
+        --external [URL] (thin client)
+          Fetch models.ini live from the router (`GET URL/models.ini`)
+          and render opencode.json against that -- no local
+          models.ini is created or kept. Re-run `install` any time to
+          pick up router-side edits. URL precedence:
+            flag arg > $LLMSTACK_REMOTE_URL > the local router
+            (http://127.0.0.1:10101).
+          The localhost default is what makes "two projects, one
+          host" work zero-config: install one project local and the
+          others --external.
+
+      $LLMSTACK_REMOTE_URL set without --external still implies
+      --external (back-compat). The activate hook re-exports this
+      var when you `cd` into an external project, so re-running
+      `install` from inside an active shell never needs the URL or
+      the flag again.
+
+      `--print` writes the rendered opencode.json to stdout instead
+      of files (still fetches the remote in external mode).
 
   install-llama-swap [--force]
       (Re-)download the llama-swap Go binary into $LLMSTACK_BIN_DIR (default
@@ -68,8 +91,10 @@ Actions:
       fallback for users who haven't run the activate hook yet.
       `--detach` skips the subshell unconditionally.
 
-      When LLMSTACK_REMOTE_URL is set, no daemons are launched: this
-      just verifies the remote /health endpoint (channel: external).
+      When the project is installed with channel=external (see
+      `install --external`), no daemons are launched: this just
+      verifies the pinned remote `GET /models.ini` (which doubles as
+      the router's health check -- there's no separate /health route).
 
   activate <zsh|bash|powershell>
       Write the auto-activation hook to ~/.<shell>_llmstack_hook and
@@ -118,13 +143,14 @@ Actions:
 
 Environment overrides:
   LLMSTACK_REMOTE_URL     base URL of a *remote* llmstack router (e.g.
-                          `http://10.0.0.5:10101`). When set, this host
-                          becomes a thin client: no daemons, no llama-swap
-                          binary, no GGUFs. `install` writes opencode.json
-                          with baseURL pointing at the remote, and `start`
-                          just verifies the remote (channel: external).
-                          `setup`, `download`, `install-llama-swap` are
-                          local-only and refuse when this is set.
+                          `http://10.0.0.5:10101`). Picked up by
+                          `install` as an alternative to passing
+                          `--external <url>`; once `install` runs, the
+                          channel + URL are persisted in
+                          .llmstack/default-channel and that file is
+                          the source of truth (the env var is only
+                          re-exported by the activate hook for
+                          downstream callers).
   LLMSTACK_MODELS_INI     path to models.ini (default:
                           <work-dir>/.llmstack/models.ini).
   LLMSTACK_WORK_DIR       where .llmstack/ + logs/ live (default: $PWD
@@ -134,8 +160,9 @@ Environment overrides:
                           root -- so commands work from any subdirectory
                           of an installed project. Without the hook,
                           run from the project root (or set this var).
-                          Local daemons are singleton (ports 10101/10102)
-                          and shared across projects.
+                          Local daemons are singleton (ports 10101/10102);
+                          to consume them from a second project on the
+                          same host, install that project --external.
   LLMSTACK_DATA_DIR       persistent user-data root (default:
                           $XDG_DATA_HOME/llmstack). Where the binary lives.
   LLMSTACK_BIN_DIR        override just the binary location.
@@ -148,11 +175,12 @@ Environment overrides:
 Channel labels (LLMSTACK_CHANNEL):
   current    local stack, canonical channel (steel-blue prompt prefix)
   next       local stack, queued-upgrade channel (orange prompt prefix)
-  external   thin client of a remote llmstack via LLMSTACK_REMOTE_URL
-             (medium-purple prompt prefix; the URL is shown alongside the
-             project name in the prompt: `[llmstack:<project> <url>]`)
-  shared     local daemons started by another project on this host
-             (yellow prompt prefix)
+  external   thin client of an llmstack router (medium-purple prompt
+             prefix; the URL is shown alongside the project name in the
+             prompt: `[llmstack:<project> <url>]`). The URL is pinned at
+             install time -- typically a remote host, but defaults to
+             the local router so two projects on one host can share a
+             single set of daemons cleanly.
 
 Channel markers on disk (.llmstack/active-channel, .llmstack/default-channel):
   one line, format `<channel>[ <url>]`. The URL is only present for
@@ -164,7 +192,7 @@ Variables exported by the activate hook (and the start fallback subshell):
   OPENCODE_CONFIG         path to the generated .llmstack/opencode.json
   LLMSTACK_WORK_DIR       absolute path to the project root (auto-detected
                           by walking up from $PWD looking for .llmstack/)
-  LLMSTACK_CHANNEL        current | next | external | shared
+  LLMSTACK_CHANNEL        current | next | external
   LLMSTACK_ACTIVE         "1" while the env is wired up
   LLMSTACK_REMOTE_URL     set when channel == external, from the marker file
   LLMSTACK_ROOT           absolute path to the llmstack package (start only)

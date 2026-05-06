@@ -34,13 +34,13 @@ from llmstack._platform import IS_WINDOWS, default_shell, shell_family
 from llmstack.paths import PACKAGE_DIR, remote_url, resolve
 
 # 256-colour palette:
-#   current  = steel-blue    (38)   -- our local stack, canonical channel
-#   next     = orange        (208)  -- our local stack, queued upgrade channel
-#   external = medium-purple (135)  -- thin client of a remote llmstack
-#                                      (LLMSTACK_REMOTE_URL is set)
-#   shared   = yellow        (220)  -- local daemons we don't own (started
-#                                      by another project on this host)
-COLOR_CODE = {"current": 38, "next": 208, "external": 135, "shared": 220}
+#   current  = steel-blue    (38)   -- local stack, canonical channel
+#   next     = orange        (208)  -- local stack, queued-upgrade channel
+#   external = medium-purple (135)  -- thin client of a remote (or
+#                                      same-host) llmstack router. URL
+#                                      is pinned at install time and
+#                                      re-exported as LLMSTACK_REMOTE_URL.
+COLOR_CODE = {"current": 38, "next": 208, "external": 135}
 
 
 def _user_shell() -> tuple[str, str]:
@@ -259,16 +259,26 @@ _ZSH_HOOK = r"""# --- llmstack auto-activation hook (zsh) ----------------------
 # from any subdirectory of an installed project. Reverses everything when
 # you step out.
 #
+# Tool-availability gate: before activating, we verify the tools needed
+# for this channel are present:
+#   - `llmstack` (always required)
+#   - `llama-swap`     (only for local channels: current / next)
+#   - `llama-server` or `llama-cli` (likewise local-only)
+# external-mode projects skip the local-tool checks because llama-swap
+# and llama-server live on the remote. If any required tool is missing
+# we print "folder detected but tool not available" + install hints and
+# DON'T activate -- the env stays clean so opencode keeps using the
+# user's global config until they install the missing piece.
+#
 # Marker file format (one line):
 #   <channel>[ <url>]
 #
 # Prompt colour by channel:
 #   current  -> steel-blue    (local stack, canonical)
 #   next     -> orange        (local stack, queued upgrade)
-#   external -> medium-purple (remote stack via LLMSTACK_REMOTE_URL)
-#   shared   -> yellow        (local daemons started by another project)
+#   external -> medium-purple (thin client; URL pinned at install time)
 # In external mode the URL is appended to the prompt label so you always
-# see which remote you're talking to: [llmstack:<project> <url>]
+# see which router you're talking to: [llmstack:<project> <url>]
 
 _llmstack_find_root() {
     local dir="${1:-$PWD}"
@@ -286,7 +296,6 @@ _llmstack_color() {
     case "${1:-current}" in
         next)     print -r -- 208 ;;
         external) print -r -- 135 ;;
-        shared)   print -r -- 220 ;;
         *)        print -r -- 38  ;;
     esac
 }
@@ -298,55 +307,120 @@ _llmstack_read_marker() {
     read -r _ch _url < "$1" || true
 }
 
+_llmstack_find_swap() {
+    # Mirror of llmstack.paths.bin_dir(): $LLMSTACK_BIN_DIR > $LLMSTACK_DATA_DIR/bin
+    # > $XDG_DATA_HOME/llmstack/bin (default ~/.local/share/llmstack/bin), then PATH.
+    local cands=()
+    [[ -n "${LLMSTACK_BIN_DIR:-}" ]]  && cands+=("$LLMSTACK_BIN_DIR/llama-swap")
+    [[ -n "${LLMSTACK_DATA_DIR:-}" ]] && cands+=("$LLMSTACK_DATA_DIR/bin/llama-swap")
+    cands+=("${XDG_DATA_HOME:-$HOME/.local/share}/llmstack/bin/llama-swap")
+    local p
+    for p in "${cands[@]}"; do
+        [[ -x "$p" ]] && return 0
+    done
+    command -v llama-swap >/dev/null 2>&1
+}
+
+_llmstack_check_tools() {
+    # Populates _llmstack_missing array. Returns 0 iff nothing is missing.
+    _llmstack_missing=()
+    command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
+    if [[ "${1:-current}" != "external" ]]; then
+        _llmstack_find_swap || _llmstack_missing+=("llama-swap")
+        if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
+            _llmstack_missing+=("llama-server")
+        fi
+    fi
+    (( ${#_llmstack_missing[@]} == 0 ))
+}
+
+_llmstack_install_hint() {
+    case "$1" in
+        llmstack)     print -r -- "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" ;;
+        llama-swap)   print -r -- "      llama-swap     llmstack install-llama-swap" ;;
+        llama-server) print -r -- "      llama-server   brew install llama.cpp  (or download from https://github.com/ggml-org/llama.cpp/releases)" ;;
+    esac
+}
+
+_llmstack_warn_missing() {
+    # $1 = project root; uses _llmstack_missing.
+    print -r -- ""
+    print -P -- "%F{220}[llmstack]%f detected $1/.llmstack but missing local tool(s):"
+    local t
+    for t in "${_llmstack_missing[@]}"; do
+        _llmstack_install_hint "$t"
+    done
+    print -r -- "    not activating. install the missing tool(s) and \`cd\` back in to retry."
+    print -r -- ""
+}
+
+_llmstack_deactivate() {
+    if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
+        if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
+            PROMPT="$_LLMSTACK_PS1_BACKUP"
+            unset _LLMSTACK_PS1_BACKUP
+        fi
+    fi
+    unset _LLMSTACK_WARNED_FOR
+}
+
 _llmstack_activate() {
     local found
     found="$(_llmstack_find_root)" || found=""
 
-    if [[ -n "$found" ]]; then
-        # entering or moving within a project
-        if [[ "${LLMSTACK_WORK_DIR:-}" != "$found" ]]; then
-            export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
-            export LLMSTACK_WORK_DIR="$found"
-            export LLMSTACK_ACTIVE="1"
-
-            local _ch _url
-            # Channel resolution: live (active-channel, written by `start`)
-            # > intent (default-channel, written by `install`) > "current".
-            if [[ -f "$found/.llmstack/active-channel" ]]; then
-                _llmstack_read_marker "$found/.llmstack/active-channel"
-            else
-                _llmstack_read_marker "$found/.llmstack/default-channel"
-            fi
-            : "${_ch:=current}"
-            export LLMSTACK_CHANNEL="$_ch"
-            if [[ "$_ch" == "external" && -n "$_url" ]]; then
-                export LLMSTACK_REMOTE_URL="$_url"
-            else
-                unset LLMSTACK_REMOTE_URL
-            fi
-
-            : "${_LLMSTACK_PS1_BACKUP:=$PROMPT}"
-            export _LLMSTACK_PS1_BACKUP
-            local label color suffix
-            label="${found:t}"
-            color="$(_llmstack_color "$_ch")"
-            if [[ "$_ch" == "external" && -n "$_url" ]]; then
-                suffix=" $_url"
-            else
-                suffix=""
-            fi
-            PROMPT="%F{${color}}[llmstack:${label}${suffix}]%f $_LLMSTACK_PS1_BACKUP"
-        fi
-    else
-        # leaving any project
-        if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-            unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
-            if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
-                PROMPT="$_LLMSTACK_PS1_BACKUP"
-                unset _LLMSTACK_PS1_BACKUP
-            fi
-        fi
+    if [[ -z "$found" ]]; then
+        _llmstack_deactivate
+        return 0
     fi
+    # Idempotency guards: same project, no re-work.
+    if [[ "${LLMSTACK_WORK_DIR:-}" == "$found" ]]; then
+        return 0
+    fi
+    if [[ "${_LLMSTACK_WARNED_FOR:-}" == "$found" ]]; then
+        return 0
+    fi
+    # Switching projects (or entering fresh) -- drop any prior activation first.
+    _llmstack_deactivate
+
+    local _ch _url
+    # Channel resolution: live (active-channel, written by `start`)
+    # > intent (default-channel, written by `install`) > "current".
+    if [[ -f "$found/.llmstack/active-channel" ]]; then
+        _llmstack_read_marker "$found/.llmstack/active-channel"
+    else
+        _llmstack_read_marker "$found/.llmstack/default-channel"
+    fi
+    : "${_ch:=current}"
+
+    # Tool gate -- bail before exporting anything if requirements aren't met.
+    if ! _llmstack_check_tools "$_ch"; then
+        _llmstack_warn_missing "$found"
+        export _LLMSTACK_WARNED_FOR="$found"
+        return 0
+    fi
+
+    export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
+    export LLMSTACK_WORK_DIR="$found"
+    export LLMSTACK_ACTIVE="1"
+    export LLMSTACK_CHANNEL="$_ch"
+    if [[ "$_ch" == "external" && -n "$_url" ]]; then
+        export LLMSTACK_REMOTE_URL="$_url"
+    else
+        unset LLMSTACK_REMOTE_URL
+    fi
+
+    : "${_LLMSTACK_PS1_BACKUP:=$PROMPT}"
+    export _LLMSTACK_PS1_BACKUP
+    local label color suffix
+    label="${found:t}"
+    color="$(_llmstack_color "$_ch")"
+    if [[ "$_ch" == "external" && -n "$_url" ]]; then
+        suffix=" $_url"
+    else
+        suffix=""
+    fi
+    PROMPT="%F{${color}}[llmstack:${label}${suffix}]%f $_LLMSTACK_PS1_BACKUP"
 }
 
 # Hook on every directory change AND once for the current shell.
@@ -365,16 +439,26 @@ _BASH_HOOK = r"""# --- llmstack auto-activation hook (bash) --------------------
 # `llmstack <action>` keys off, so commands work from any subdirectory of
 # an installed project. Reverses everything when you step out.
 #
+# Tool-availability gate: before activating we verify the tools needed
+# for this channel are present:
+#   - `llmstack` (always required)
+#   - `llama-swap`     (only for local channels: current / next)
+#   - `llama-server` or `llama-cli` (likewise local-only)
+# If any required tool is missing we print a one-shot "folder detected
+# but tool not available" warning + install hints and DON'T activate
+# (env stays clean). The warning is suppressed on subsequent prompts in
+# the same project via the _LLMSTACK_WARNED_FOR guard so we don't spam
+# every PROMPT_COMMAND tick.
+#
 # Marker file format (one line):
 #   <channel>[ <url>]
 #
 # Prompt colour by channel:
 #   current  -> steel-blue    (local stack, canonical)
 #   next     -> orange        (local stack, queued upgrade)
-#   external -> medium-purple (remote stack via LLMSTACK_REMOTE_URL)
-#   shared   -> yellow        (local daemons started by another project)
+#   external -> medium-purple (thin client; URL pinned at install time)
 # In external mode the URL is appended to the prompt label so you always
-# see which remote you're talking to: [llmstack:<project> <url>]
+# see which router you're talking to: [llmstack:<project> <url>]
 
 _llmstack_find_root() {
     local dir="${1:-$PWD}"
@@ -392,7 +476,6 @@ _llmstack_color() {
     case "${1:-current}" in
         next)     printf '%s' 208 ;;
         external) printf '%s' 135 ;;
-        shared)   printf '%s' 220 ;;
         *)        printf '%s' 38  ;;
     esac
 }
@@ -403,56 +486,117 @@ _llmstack_read_marker() {
     read -r _ch _url < "$1" || true
 }
 
+_llmstack_find_swap() {
+    # Mirror of llmstack.paths.bin_dir(): $LLMSTACK_BIN_DIR > $LLMSTACK_DATA_DIR/bin
+    # > $XDG_DATA_HOME/llmstack/bin (default ~/.local/share/llmstack/bin), then PATH.
+    local cands=()
+    [[ -n "${LLMSTACK_BIN_DIR:-}" ]]  && cands+=("$LLMSTACK_BIN_DIR/llama-swap")
+    [[ -n "${LLMSTACK_DATA_DIR:-}" ]] && cands+=("$LLMSTACK_DATA_DIR/bin/llama-swap")
+    cands+=("${XDG_DATA_HOME:-$HOME/.local/share}/llmstack/bin/llama-swap")
+    local p
+    for p in "${cands[@]}"; do
+        [[ -x "$p" ]] && return 0
+    done
+    command -v llama-swap >/dev/null 2>&1
+}
+
+_llmstack_check_tools() {
+    _llmstack_missing=()
+    command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
+    if [[ "${1:-current}" != "external" ]]; then
+        _llmstack_find_swap || _llmstack_missing+=("llama-swap")
+        if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
+            _llmstack_missing+=("llama-server")
+        fi
+    fi
+    [[ ${#_llmstack_missing[@]} -eq 0 ]]
+}
+
+_llmstack_install_hint() {
+    case "$1" in
+        llmstack)     printf '%s\n' "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" ;;
+        llama-swap)   printf '%s\n' "      llama-swap     llmstack install-llama-swap" ;;
+        llama-server) printf '%s\n' "      llama-server   brew install llama.cpp  (or download from https://github.com/ggml-org/llama.cpp/releases)" ;;
+    esac
+}
+
+_llmstack_warn_missing() {
+    printf '\n'
+    printf '\033[38;5;220m[llmstack]\033[0m detected %s/.llmstack but missing local tool(s):\n' "$1"
+    local t
+    for t in "${_llmstack_missing[@]}"; do
+        _llmstack_install_hint "$t"
+    done
+    printf '    not activating. install the missing tool(s) and `cd` back in to retry.\n\n'
+}
+
+_llmstack_deactivate() {
+    if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
+        if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
+            PS1="$_LLMSTACK_PS1_BACKUP"
+            unset _LLMSTACK_PS1_BACKUP
+        fi
+    fi
+    unset _LLMSTACK_WARNED_FOR
+}
+
 _llmstack_activate() {
     local found
     found="$(_llmstack_find_root)" || found=""
 
-    if [[ -n "$found" ]]; then
-        if [[ "${LLMSTACK_WORK_DIR:-}" != "$found" ]]; then
-            export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
-            export LLMSTACK_WORK_DIR="$found"
-            export LLMSTACK_ACTIVE="1"
-
-            local _ch _url
-            # Channel resolution: live > intent > "current" (see zsh hook).
-            if [[ -f "$found/.llmstack/active-channel" ]]; then
-                _llmstack_read_marker "$found/.llmstack/active-channel"
-            else
-                _llmstack_read_marker "$found/.llmstack/default-channel"
-            fi
-            : "${_ch:=current}"
-            export LLMSTACK_CHANNEL="$_ch"
-            if [[ "$_ch" == "external" && -n "$_url" ]]; then
-                export LLMSTACK_REMOTE_URL="$_url"
-            else
-                unset LLMSTACK_REMOTE_URL
-            fi
-
-            : "${_LLMSTACK_PS1_BACKUP:=$PS1}"
-            export _LLMSTACK_PS1_BACKUP
-            local label color suffix
-            label="$(basename "$found")"
-            color="$(_llmstack_color "$_ch")"
-            if [[ "$_ch" == "external" && -n "$_url" ]]; then
-                suffix=" $_url"
-            else
-                suffix=""
-            fi
-            PS1="\[\033[38;5;${color}m\][llmstack:${label}${suffix}]\[\033[0m\] $_LLMSTACK_PS1_BACKUP"
-        fi
-    else
-        if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-            unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
-            if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
-                PS1="$_LLMSTACK_PS1_BACKUP"
-                unset _LLMSTACK_PS1_BACKUP
-            fi
-        fi
+    if [[ -z "$found" ]]; then
+        _llmstack_deactivate
+        return 0
     fi
+    if [[ "${LLMSTACK_WORK_DIR:-}" == "$found" ]]; then
+        return 0
+    fi
+    if [[ "${_LLMSTACK_WARNED_FOR:-}" == "$found" ]]; then
+        return 0
+    fi
+    _llmstack_deactivate
+
+    local _ch _url
+    if [[ -f "$found/.llmstack/active-channel" ]]; then
+        _llmstack_read_marker "$found/.llmstack/active-channel"
+    else
+        _llmstack_read_marker "$found/.llmstack/default-channel"
+    fi
+    : "${_ch:=current}"
+
+    if ! _llmstack_check_tools "$_ch"; then
+        _llmstack_warn_missing "$found"
+        export _LLMSTACK_WARNED_FOR="$found"
+        return 0
+    fi
+
+    export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
+    export LLMSTACK_WORK_DIR="$found"
+    export LLMSTACK_ACTIVE="1"
+    export LLMSTACK_CHANNEL="$_ch"
+    if [[ "$_ch" == "external" && -n "$_url" ]]; then
+        export LLMSTACK_REMOTE_URL="$_url"
+    else
+        unset LLMSTACK_REMOTE_URL
+    fi
+
+    : "${_LLMSTACK_PS1_BACKUP:=$PS1}"
+    export _LLMSTACK_PS1_BACKUP
+    local label color suffix
+    label="$(basename "$found")"
+    color="$(_llmstack_color "$_ch")"
+    if [[ "$_ch" == "external" && -n "$_url" ]]; then
+        suffix=" $_url"
+    else
+        suffix=""
+    fi
+    PS1="\[\033[38;5;${color}m\][llmstack:${label}${suffix}]\[\033[0m\] $_LLMSTACK_PS1_BACKUP"
 }
 
-# Bash has no chpwd hook, so we run on every prompt. Idempotent: if the
-# project hasn't changed, we no-op.
+# Bash has no chpwd hook, so we run on every prompt. Idempotent: the
+# guards above (LLMSTACK_WORK_DIR or _LLMSTACK_WARNED_FOR matching
+# $found) make repeated calls a no-op.
 case ";${PROMPT_COMMAND:-};" in
     *";_llmstack_activate;"*) ;;
     *) PROMPT_COMMAND="_llmstack_activate;${PROMPT_COMMAND:-}" ;;
@@ -472,6 +616,15 @@ _POWERSHELL_HOOK = r"""# --- llmstack auto-activation hook (PowerShell) --------
 # subdirectory of an installed project. Reverses everything when you cd
 # out of the project.
 #
+# Tool-availability gate: before activating we verify the tools needed
+# for this channel are present:
+#   - llmstack (always required)
+#   - llama-swap (only for local channels: current / next)
+#   - llama-server or llama-cli (likewise local-only)
+# If any required tool is missing we print a one-shot warning + install
+# hints and DON'T activate. The _LLMSTACK_WARNED_FOR guard suppresses
+# the warning on subsequent prompts in the same project.
+#
 # Add to your $PROFILE (one time):
 #     llmstack activate powershell | Out-String | Invoke-Expression
 # or, to persist across sessions:
@@ -484,7 +637,6 @@ _POWERSHELL_HOOK = r"""# --- llmstack auto-activation hook (PowerShell) --------
 #   current  -> steel-blue    (38)
 #   next     -> orange        (208)
 #   external -> medium-purple (135)
-#   shared   -> yellow        (220)
 
 function global:_LlmstackFindRoot {
     param([string]$Start = (Get-Location).Path)
@@ -505,7 +657,6 @@ function global:_LlmstackChannelColor {
     switch ($Channel) {
         "next"     { 208 }
         "external" { 135 }
-        "shared"   { 220 }
         default    { 38  }
     }
 }
@@ -522,31 +673,58 @@ function global:_LlmstackReadMarker {
     }
 }
 
-function global:_LlmstackActivate {
-    $found = _LlmstackFindRoot
-    if ($found) {
-        if ($env:LLMSTACK_WORK_DIR -ne $found) {
-            $env:OPENCODE_CONFIG   = Join-Path $found ".llmstack/opencode.json"
-            $env:LLMSTACK_WORK_DIR = $found
-            $env:LLMSTACK_ACTIVE   = "1"
+function global:_LlmstackFindSwap {
+    # Mirror of llmstack.paths.bin_dir(): $LLMSTACK_BIN_DIR > $LLMSTACK_DATA_DIR\bin
+    # > $LOCALAPPDATA\llmstack\bin (Windows) or $XDG_DATA_HOME/llmstack/bin (POSIX),
+    # then PATH.
+    $cands = @()
+    if ($env:LLMSTACK_BIN_DIR)  { $cands += (Join-Path $env:LLMSTACK_BIN_DIR  "llama-swap.exe") }
+    if ($env:LLMSTACK_DATA_DIR) { $cands += (Join-Path $env:LLMSTACK_DATA_DIR "bin\llama-swap.exe") }
+    if ($env:LOCALAPPDATA)      { $cands += (Join-Path $env:LOCALAPPDATA      "llmstack\bin\llama-swap.exe") }
+    if ($env:XDG_DATA_HOME)     { $cands += (Join-Path $env:XDG_DATA_HOME     "llmstack/bin/llama-swap") }
+    if ($env:HOME)              { $cands += (Join-Path $env:HOME              ".local/share/llmstack/bin/llama-swap") }
+    foreach ($p in $cands) {
+        if (Test-Path -LiteralPath $p) { return $true }
+    }
+    return [bool](Get-Command llama-swap -ErrorAction SilentlyContinue)
+}
 
-            $live    = Join-Path $found ".llmstack/active-channel"
-            $intent  = Join-Path $found ".llmstack/default-channel"
-            $marker  = if (Test-Path -LiteralPath $live) { _LlmstackReadMarker $live } else { _LlmstackReadMarker $intent }
-            $channel = if ($marker.channel) { $marker.channel } else { "current" }
-            $env:LLMSTACK_CHANNEL = $channel
-            if ($channel -eq "external" -and $marker.url) {
-                $env:LLMSTACK_REMOTE_URL = $marker.url
-            } else {
-                Remove-Item Env:LLMSTACK_REMOTE_URL -ErrorAction SilentlyContinue
-            }
-
-            $global:_LLMSTACK_PROMPT_COLOR  = _LlmstackChannelColor $channel
-            $global:_LLMSTACK_PROMPT_LABEL  = Split-Path $found -Leaf
-            $global:_LLMSTACK_PROMPT_SUFFIX = if ($channel -eq "external" -and $marker.url) { " " + $marker.url } else { "" }
-            $global:_LLMSTACK_PROMPT_ON     = $true
+function global:_LlmstackCheckTools {
+    param([string]$Channel)
+    $missing = @()
+    if (-not (Get-Command llmstack -ErrorAction SilentlyContinue)) { $missing += "llmstack" }
+    if ($Channel -ne "external") {
+        if (-not (_LlmstackFindSwap)) { $missing += "llama-swap" }
+        if (-not (Get-Command llama-server -ErrorAction SilentlyContinue) -and `
+            -not (Get-Command llama-cli    -ErrorAction SilentlyContinue)) {
+            $missing += "llama-server"
         }
-    } elseif ($env:LLMSTACK_WORK_DIR) {
+    }
+    return ,$missing
+}
+
+function global:_LlmstackInstallHint {
+    param([string]$Tool)
+    switch ($Tool) {
+        "llmstack"     { "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" }
+        "llama-swap"   { "      llama-swap     llmstack install-llama-swap" }
+        "llama-server" { "      llama-server   download from https://github.com/ggml-org/llama.cpp/releases" }
+    }
+}
+
+function global:_LlmstackWarnMissing {
+    param([string]$Found, [string[]]$Missing)
+    Write-Host ""
+    $esc = [char]27
+    Write-Host -NoNewline "${esc}[38;5;220m[llmstack]${esc}[0m "
+    Write-Host "detected $Found\.llmstack but missing local tool(s):"
+    foreach ($t in $Missing) { Write-Host (_LlmstackInstallHint $t) }
+    Write-Host "    not activating. install the missing tool(s) and cd back in to retry."
+    Write-Host ""
+}
+
+function global:_LlmstackDeactivate {
+    if ($env:LLMSTACK_WORK_DIR) {
         Remove-Item Env:OPENCODE_CONFIG     -ErrorAction SilentlyContinue
         Remove-Item Env:LLMSTACK_WORK_DIR   -ErrorAction SilentlyContinue
         Remove-Item Env:LLMSTACK_ACTIVE     -ErrorAction SilentlyContinue
@@ -554,6 +732,46 @@ function global:_LlmstackActivate {
         Remove-Item Env:LLMSTACK_REMOTE_URL -ErrorAction SilentlyContinue
         $global:_LLMSTACK_PROMPT_ON = $false
     }
+    Remove-Item Env:_LLMSTACK_WARNED_FOR -ErrorAction SilentlyContinue
+}
+
+function global:_LlmstackActivate {
+    $found = _LlmstackFindRoot
+    if (-not $found) {
+        _LlmstackDeactivate
+        return
+    }
+    if ($env:LLMSTACK_WORK_DIR -eq $found) { return }
+    if ($env:_LLMSTACK_WARNED_FOR -eq $found) { return }
+
+    _LlmstackDeactivate
+
+    $live    = Join-Path $found ".llmstack/active-channel"
+    $intent  = Join-Path $found ".llmstack/default-channel"
+    $marker  = if (Test-Path -LiteralPath $live) { _LlmstackReadMarker $live } else { _LlmstackReadMarker $intent }
+    $channel = if ($marker.channel) { $marker.channel } else { "current" }
+
+    $missing = _LlmstackCheckTools $channel
+    if ($missing.Count -gt 0) {
+        _LlmstackWarnMissing $found $missing
+        $env:_LLMSTACK_WARNED_FOR = $found
+        return
+    }
+
+    $env:OPENCODE_CONFIG   = Join-Path $found ".llmstack/opencode.json"
+    $env:LLMSTACK_WORK_DIR = $found
+    $env:LLMSTACK_ACTIVE   = "1"
+    $env:LLMSTACK_CHANNEL  = $channel
+    if ($channel -eq "external" -and $marker.url) {
+        $env:LLMSTACK_REMOTE_URL = $marker.url
+    } else {
+        Remove-Item Env:LLMSTACK_REMOTE_URL -ErrorAction SilentlyContinue
+    }
+
+    $global:_LLMSTACK_PROMPT_COLOR  = _LlmstackChannelColor $channel
+    $global:_LLMSTACK_PROMPT_LABEL  = Split-Path $found -Leaf
+    $global:_LLMSTACK_PROMPT_SUFFIX = if ($channel -eq "external" -and $marker.url) { " " + $marker.url } else { "" }
+    $global:_LLMSTACK_PROMPT_ON     = $true
 }
 
 # Wrap the existing prompt once so every prompt cycle re-runs the

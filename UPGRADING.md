@@ -506,7 +506,8 @@ llmstack check                    # smoke-test PyYAML + huggingface_hub
 3. Test the router:
 
        llmstack stop && llmstack start
-       curl -s http://127.0.0.1:10101/health
+       curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
+       curl -s http://127.0.0.1:10101/models.ini | head
        curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: application/json' \
             -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}'
 
