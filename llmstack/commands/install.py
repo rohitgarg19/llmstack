@@ -35,7 +35,6 @@ from llmstack.paths import (
     write_marker,
 )
 
-
 _BEDROCK_BEGIN = "; >>> AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE >>>"
 _BEDROCK_END   = "; <<< AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE <<<"
 

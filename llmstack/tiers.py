@@ -47,6 +47,7 @@ from pathlib import Path
 from llmstack.paths import models_ini_path, require_models_ini
 
 DIGITS = re.compile(r"\d+")
+SAMPLER_KV = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
 
 BACKEND_GGUF = "gguf"
 BACKEND_BEDROCK = "bedrock"
@@ -56,6 +57,20 @@ KNOWN_BACKENDS = {BACKEND_GGUF, BACKEND_BEDROCK}
 def _int(value: str, default: int = 0) -> int:
     m = DIGITS.search(value or "")
     return int(m.group()) if m else default
+
+
+def parse_sampler(raw: str) -> dict[str, float]:
+    """Parse a ``sampler = temp=0.5, top_p=0.85, top_k=20, ...`` line.
+
+    Returns a dict keyed by the short name as it appears in models.ini
+    (``temp``, ``top_p``, ``top_k``, ``min_p``, ``rep_pen``). The router
+    is responsible for translating these into the OpenAI-compatible
+    request-body field names that backends understand. An empty / missing
+    line yields ``{}`` -- the canonical "no sampler tuning" signal that
+    the router uses to pass requests through untouched (which is what
+    Bedrock Claude Opus 4.7 et al. require).
+    """
+    return {k: float(v) for k, v in SAMPLER_KV.findall(raw or "")}
 
 
 def _strip(value: str | None) -> str:
@@ -129,7 +144,7 @@ class BedrockConfig:
     def has_next(self) -> bool:
         return bool(self.model_id_next)
 
-    def resolved(self, use_next: bool = False) -> "BedrockConfig":
+    def resolved(self, use_next: bool = False) -> BedrockConfig:
         """Return a copy with model_id/region swapped to the queued upgrade.
 
         No-op when ``use_next`` is false or the tier has no queued
@@ -169,6 +184,17 @@ class Tier:
     file_next: str | None = None
     bedrock: BedrockConfig | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    # Per-tier sampling defaults (parsed from `sampler = ...` in models.ini).
+    # The router injects these into outbound request bodies so that:
+    #   1. opencode.json stays sampler-free (clients pick a model and let
+    #      the stack decide how to sample it).
+    #   2. Bedrock-hosted tiers whose backing model rejects sampler params
+    #      (e.g. Claude Opus 4.7) can simply omit `sampler =` and the
+    #      router will pass requests through untouched.
+    # Keys are the short names as written in models.ini (`temp`, `top_p`,
+    # `top_k`, `min_p`, `rep_pen`); the router maps them to OpenAI-compat
+    # request fields.
+    sampler: dict[str, float] = field(default_factory=dict)
 
     def files(self) -> list[TierFile]:
         """Return the GGUF download targets for this tier (empty for non-gguf)."""
@@ -313,6 +339,7 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
             "description": _strip(s.get("description")) or sec,
             "ctx_size":    _int(s.get("ctx_size", "")),
             "aliases":     _aliases(s),
+            "sampler":     parse_sampler(s.get("sampler", "")),
         }
 
         if backend == BACKEND_GGUF:

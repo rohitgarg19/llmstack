@@ -30,7 +30,6 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 from llmstack._platform import EXE_SUFFIX, user_data_root
 
@@ -248,7 +247,7 @@ class ChannelMark:
     """One channel-marker file's worth of state."""
 
     channel: str
-    url: Optional[str] = None
+    url: str | None = None
 
     def serialize(self) -> str:
         if self.url:
@@ -256,7 +255,7 @@ class ChannelMark:
         return f"{self.channel}\n"
 
     @classmethod
-    def parse(cls, text: str) -> "ChannelMark | None":
+    def parse(cls, text: str) -> ChannelMark | None:
         line = text.strip()
         if not line:
             return None

@@ -10,11 +10,32 @@ What gets wired:
   model                 ``auto``  (FastAPI router classifies and rewrites
                                   model names)
   small_model           tier with ``role=fast``  (tab-complete, titles)
-  agent.build           ``role=agent``           -- full permissions, tool use
+  agent.build           ``auto``                 -- always routed
   agent.plan            ``role=plan``            -- read-only, no bash
   agent.plan-nofilter   ``role=plan-uncensored`` -- read-only, no bash
   command./review,
   command./nofilter     shortcuts that the router can't auto-classify
+
+What is **deliberately NOT wired**:
+
+  Sampler params (``temperature``, ``top_p``, etc.) are NEVER emitted on
+  any agent or model in opencode.json. Sampling is the *backend's*
+  responsibility, with ``models.ini`` as the single source of truth:
+
+  * gguf tiers -- :mod:`llmstack.generators.llama_swap` bakes the
+    tier's ``sampler = ...`` into the llama-server startup command line
+    (``--temp``/``--top-p``/...). llama-server applies them as defaults
+    for every request.
+  * Bedrock tiers -- :func:`llmstack.app._inject_sampler` adds the
+    tier's sampler keys to each outbound request body (Bedrock has no
+    server-side defaults mechanism). Bedrock models that reject sampler
+    params (e.g. Claude Opus 4.7) declare an empty ``sampler =`` and
+    the router passes requests through untouched.
+
+  Either way, opencode.json never carries sampler params -- one place to
+  edit (``models.ini``), no risk of opencode drifting from the actual
+  tier config, and any other router client (curl, a different IDE) gets
+  the same per-tier behaviour for free.
 """
 
 from __future__ import annotations
@@ -79,18 +100,13 @@ def _instructions_paths() -> list[str]:
     return [p for p in raw.split(":") if p]
 
 
-ZERO_COST  = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
-SAMPLER_KV = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
-DIGITS     = re.compile(r"\d+")
+ZERO_COST = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+DIGITS    = re.compile(r"\d+")
 
 
 def _int(value: str, default: int) -> int:
     m = DIGITS.search(value or "")
     return int(m.group()) if m else default
-
-
-def _sampler(raw: str) -> dict[str, float]:
-    return {k: float(v) for k, v in SAMPLER_KV.findall(raw or "")}
 
 
 def build_config(ini_path: Path | None = None) -> dict:
@@ -107,9 +123,11 @@ def build_config(ini_path: Path | None = None) -> dict:
         # Client mode: send all traffic to the remote router. Keep the
         # tier / agent wiring derived from the local models.ini -- the
         # remote stack is expected to expose the same tier names; tier
-        # ``ctx_size``, sampler, etc. are useful client-side hints
-        # (used by opencode for prompt-packing) regardless of where the
-        # actual model lives.
+        # ``ctx_size`` is a useful client-side hint (used by opencode
+        # for prompt-packing) regardless of where the actual model
+        # lives. Sampling is the *router's* responsibility (it injects
+        # per-tier defaults from its own models.ini), so it never
+        # appears in opencode.json.
         base_url = f"{rurl}/v1"
     else:
         host     = (defaults.get("host") or "127.0.0.1").strip()
@@ -142,7 +160,6 @@ def build_config(ini_path: Path | None = None) -> dict:
         role = (s.get("role") or "").strip()
         ctx  = _int(s.get("ctx_size", ""), 8192)
         desc = (s.get("description") or sec).strip()
-        sp   = _sampler(s.get("sampler", ""))
 
         model_entry: dict = {
             "name":      desc,
@@ -163,9 +180,18 @@ def build_config(ini_path: Path | None = None) -> dict:
             small_model = model_ref
             continue
 
-        agent: dict = {"model": model_ref}
-        if "temp"  in sp: agent["temperature"] = sp["temp"]
-        if "top_p" in sp: agent["top_p"]       = sp["top_p"]
+        # `build` is always wired to the auto router so escalation to
+        # code-ultra (or fallback to code-fast) happens transparently.
+        if agent_name == "build":
+            agent_model_ref = f"{PROVIDER_KEY}/auto"
+        else:
+            agent_model_ref = model_ref
+
+        # Sampler params are intentionally absent here -- the router
+        # injects per-tier defaults from models.ini at request time
+        # (see :func:`llmstack.app._inject_sampler`). See the module
+        # docstring for the rationale.
+        agent: dict = {"model": agent_model_ref}
         if agent_name in READ_ONLY_AGENTS:
             agent["permission"] = {"edit": "deny", "write": "deny", "bash": "deny"}
         agents[agent_name] = agent  # type: ignore[index]

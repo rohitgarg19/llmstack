@@ -44,8 +44,9 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import AsyncIterator
 from threading import Lock
-from typing import Any, AsyncIterator
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -189,13 +190,40 @@ def _system_blocks(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     return out
 
 
+_ORPHAN_TOOL_RESULT_TEXT = (
+    "(no result; tool call was cancelled or interrupted -- treat as failed)"
+)
+
+
 def _converse_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate the non-system slice of OpenAI messages to Converse shape.
 
-    Tool calls (assistant) and tool results (role=tool) round-trip via
-    ``toolUse`` / ``toolResult`` content blocks.
+    Tool calls (assistant) and tool results (``role: "tool"``) round-trip
+    via ``toolUse`` / ``toolResult`` content blocks. The OpenAI shape and
+    the Bedrock Converse shape disagree on two things, so we normalise:
+
+    1. **Tool results merge into the next user turn.** OpenAI emits one
+       ``role: "tool"`` message per tool result; Converse expects all
+       toolResults from a single assistant turn to live in *one*
+       following user turn (along with any subsequent user text).
+       Without this, Bedrock 400s with
+       ``Expected toolResult blocks at messages.N.content``.
+
+    2. **Strict role alternation.** Bedrock rejects consecutive
+       same-role turns. We collapse any run of consecutive user (or
+       tool-as-user) messages into a single user message by
+       concatenating their content blocks.
+
+    On top of that we **inject stub toolResults for orphan toolUse
+    blocks** -- assistant turns whose tool_calls were never resolved
+    (user cancelled, transport dropped the result, etc.). Without the
+    stub, Bedrock surfaces the same "Expected toolResult blocks" error
+    even though the missing resolution is the *previous* run's fault.
+    Stubs carry ``status: "error"`` so the model knows the call failed
+    rather than silently treating an empty payload as success.
     """
-    out: list[dict[str, Any]] = []
+    raw: list[tuple[str, list[dict[str, Any]]]] = []
+
     for m in messages:
         role = m.get("role")
         if role == "system":
@@ -204,15 +232,12 @@ def _converse_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role == "tool":
             tool_call_id = m.get("tool_call_id") or m.get("id") or ""
             text = _coerce_text(m.get("content"))
-            out.append({
-                "role": "user",
-                "content": [{
-                    "toolResult": {
-                        "toolUseId": tool_call_id,
-                        "content": [{"text": text}],
-                    }
-                }],
-            })
+            raw.append(("user", [{
+                "toolResult": {
+                    "toolUseId": tool_call_id,
+                    "content": [{"text": text}],
+                },
+            }]))
             continue
 
         blocks: list[dict[str, Any]] = []
@@ -234,16 +259,124 @@ def _converse_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "toolUseId": tc.get("id") or f"tool_{uuid.uuid4().hex[:12]}",
                         "name": name,
                         "input": parsed if isinstance(parsed, dict) else {"value": parsed},
-                    }
+                    },
                 })
 
         if not blocks:
             continue
-        out.append({
-            "role": "assistant" if role == "assistant" else "user",
-            "content": blocks,
-        })
-    return out
+        raw.append(("assistant" if role == "assistant" else "user", blocks))
+
+    # Pass 1: collapse runs of same-role messages into one. Tool results
+    # already arrive as ``("user", [...])`` entries above, so this naturally
+    # gathers them with each other and with any following user text.
+    merged: list[list[Any]] = []
+    for role, blocks in raw:
+        if merged and merged[-1][0] == role:
+            merged[-1][1].extend(blocks)
+        else:
+            merged.append([role, list(blocks)])
+
+    # Pass 2: for every assistant turn that emits toolUse blocks, ensure
+    # the next user turn carries a matching toolResult for each id. Inject
+    # a stub error result for any orphan id; create a stub user turn if
+    # none follows at all.
+    i = 0
+    while i < len(merged):
+        role, blocks = merged[i]
+        if role != "assistant":
+            i += 1
+            continue
+        tool_use_ids = [
+            (b["toolUse"] or {}).get("toolUseId")
+            for b in blocks
+            if isinstance(b, dict) and "toolUse" in b
+        ]
+        tool_use_ids = [tid for tid in tool_use_ids if tid]
+        if not tool_use_ids:
+            i += 1
+            continue
+
+        if i + 1 >= len(merged) or merged[i + 1][0] != "user":
+            merged.insert(i + 1, ["user", []])
+        next_blocks = merged[i + 1][1]
+        provided = {
+            (b["toolResult"] or {}).get("toolUseId")
+            for b in next_blocks
+            if isinstance(b, dict) and "toolResult" in b
+        }
+        # Prepend any missing stubs so toolResults sit before user text,
+        # which matches what callers naturally produce.
+        stubs: list[dict[str, Any]] = []
+        for tid in tool_use_ids:
+            if tid in provided:
+                continue
+            stubs.append({
+                "toolResult": {
+                    "toolUseId": tid,
+                    "content": [{"text": _ORPHAN_TOOL_RESULT_TEXT}],
+                    "status": "error",
+                },
+            })
+        if stubs:
+            log.debug(
+                "bedrock: injected %d orphan toolResult stub(s) for ids=%s",
+                len(stubs), [s["toolResult"]["toolUseId"] for s in stubs],
+            )
+            merged[i + 1][1] = stubs + next_blocks
+        i += 1
+
+    return [
+        {"role": role, "content": blocks}
+        for role, blocks in merged
+        if blocks
+    ]
+
+
+def _messages_reference_tools(converse_messages: list[dict[str, Any]]) -> set[str]:
+    """Return the set of tool *names* referenced by toolUse blocks in history.
+
+    Used to synthesise a minimum ``toolConfig`` when the inbound request
+    body has no ``tools`` array but the message history replays prior
+    tool calls -- Bedrock rejects that combination outright with
+    ``The toolConfig field must be defined when using toolUse and
+    toolResult content blocks``. ToolResult blocks only carry the tool
+    *id*, not the name, so we recover names from the matching toolUse
+    blocks earlier in the conversation.
+    """
+    names: set[str] = set()
+    for m in converse_messages:
+        for b in m.get("content") or []:
+            if not isinstance(b, dict):
+                continue
+            tu = b.get("toolUse")
+            if isinstance(tu, dict):
+                name = tu.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+    return names
+
+
+def _stub_tool_config(names: set[str]) -> dict[str, Any]:
+    """Minimum-viable ``toolConfig`` for replaying tool history.
+
+    The schema is permissive (``{"type": "object"}``) since we're only
+    declaring tools to satisfy Bedrock's validator -- the model is meant
+    to summarise / continue, not invoke a fresh call. If it does call
+    one, opencode will resolve it on the next loop with the real schema
+    in scope.
+    """
+    return {
+        "tools": [
+            {
+                "toolSpec": {
+                    "name": name,
+                    "description": "(replayed from history; schema unavailable)",
+                    "inputSchema": {"json": {"type": "object"}},
+                },
+            }
+            for name in sorted(names)
+        ],
+    }
 
 
 def _tool_config(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
@@ -268,6 +401,20 @@ def _tool_config(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
 
 
 def _inference_config(body: dict[str, Any]) -> dict[str, Any]:
+    # We forward only what the Converse `inferenceConfig` schema accepts:
+    # `temperature`, `topP`, `maxTokens`, `stopSequences`. Other sampler
+    # knobs (`top_k`, `min_p`, `repetition_penalty`) have no Converse-
+    # standard mapping and are silently dropped here -- they're llama.cpp
+    # extensions used only by local GGUF tiers.
+    #
+    # Per-model rules about which of these are valid (e.g. Claude Opus
+    # 4.7 rejects ALL sampler params; Claude Sonnet 4.5 accepts either
+    # `temperature` or `top_p` but not both) are NOT enforced here. They
+    # live in models.ini -- whichever sampler keys are declared on the
+    # tier are what the router injects into the body, and that's what we
+    # forward. Configure Bedrock tiers in models.ini accordingly: omit
+    # the `sampler =` line for Opus 4.7+, and pick the one allowed knob
+    # for Sonnet 4.5 / Haiku 4.5.
     cfg: dict[str, Any] = {}
     if "temperature" in body:
         try:
@@ -306,9 +453,10 @@ def _build_converse_kwargs(tier: Tier, body: dict[str, Any], cfg: BedrockConfig)
         prompt = body.get("prompt") or ""
         messages = [{"role": "user", "content": prompt}]
 
+    converse_messages = _converse_messages(messages)
     converse_kwargs: dict[str, Any] = {
         "modelId": cfg.model_id,
-        "messages": _converse_messages(messages),
+        "messages": converse_messages,
     }
     sys_blocks = _system_blocks(messages)
     if sys_blocks:
@@ -319,6 +467,20 @@ def _build_converse_kwargs(tier: Tier, body: dict[str, Any], cfg: BedrockConfig)
         converse_kwargs["inferenceConfig"] = inference
 
     tools = _tool_config(body.get("tools"))
+    if tools is None:
+        # Body didn't ship `tools`, but the message history might replay
+        # prior tool calls (e.g. opencode continuing a conversation that
+        # started with tools registered). Bedrock requires toolConfig
+        # whenever any toolUse/toolResult block is present in messages,
+        # so we synthesise stub specs from the names referenced in the
+        # converted history.
+        referenced = _messages_reference_tools(converse_messages)
+        if referenced:
+            tools = _stub_tool_config(referenced)
+            log.debug(
+                "bedrock: synthesised stub toolConfig for replayed names=%s",
+                sorted(referenced),
+            )
     if tools:
         converse_kwargs["toolConfig"] = tools
     return converse_kwargs

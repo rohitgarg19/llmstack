@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llmstack._platform import detached_popen, find_pids
-from llmstack.paths import ensure_state_dirs, resolve, require_models_ini
+from llmstack.paths import ensure_state_dirs, require_models_ini, resolve
 from llmstack.tiers import iter_download_targets, load_tiers
 
 LLAMA_BINS = ("llama-completion", "llama-cli")

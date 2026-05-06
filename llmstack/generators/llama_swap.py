@@ -117,12 +117,7 @@ ROPE_RE = re.compile(
     r"yarn\s*\(\s*scale\s*=\s*(\d+)\s*,\s*orig_ctx\s*=\s*(\d+)\s*\)",
     re.IGNORECASE,
 )
-SAMPLER_RE = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
 SIZE_RE = re.compile(r"[\d.]+")
-
-
-def parse_sampler(raw: str) -> dict[str, float]:
-    return {k: float(v) for k, v in SAMPLER_RE.findall(raw or "")}
 
 
 def parse_rope(raw: str) -> tuple[int, int] | None:
@@ -166,9 +161,22 @@ def build_metal_defaults(d) -> str:
 
 
 def build_cmd(tier, section, *, use_next: bool = False) -> str:
-    """The multi-line ``cmd`` literal block scalar for one tier."""
-    sampler = parse_sampler(section.get("sampler", ""))
+    """The multi-line ``cmd`` literal block scalar for one tier.
+
+    Sampling defaults (``--temp`` / ``--top-p`` / ``--top-k`` /
+    ``--min-p`` / ``--repeat-penalty``) are baked into the llama-server
+    startup command line for gguf tiers. They come from the tier's
+    ``sampler = ...`` line in ``models.ini`` (already parsed into
+    ``tier.sampler``). llama-server then applies them as its defaults
+    for any request that does not override them in the body.
+
+    This keeps the per-request injection path (in
+    :func:`llmstack.app._inject_sampler`) Bedrock-only -- gguf
+    sampling is a server-startup concern, since the CLI flags
+    survive across requests and don't break any backend's schema.
+    """
     rope = parse_rope(section.get("rope_scaling", ""))
+    sampler = tier.sampler
 
     has_queued = bool(tier.file_next)
     running_next = use_next and has_queued

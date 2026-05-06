@@ -58,17 +58,40 @@ Routing decisions cost ~zero — they're a few regex checks in the FastAPI route
 **Temperature ladder** (low → high = "doing" → "thinking"): code-fast 0.2 (deterministic) · code-smart 0.5 (balanced agent) · plan 0.7 (creative ideation) · plan-uncensored 0.85 (max exploration).
 opencode `agent.<name>.temperature` is set to match — clients can still override per request.
 
-## How `auto` decides (first match wins)
+## How `auto` decides
+
+The router runs a **step-down fidelity ladder**: start at the top tier
+for new / short conversations, drop down as the context grows. This
+inverts the classic "escalate when input gets big" pattern, and it
+matches how these models actually behave on this stack:
+
+- **Top-tier hosted** (Claude Opus/Sonnet on Bedrock) — fastest *and*
+  most accurate on short prompts, but per-request latency and $cost
+  scale with input tokens, and long-context behaviour degrades faster
+  than headline benchmarks suggest.
+- **`code-smart`** (Qwen3-Coder 80B) — 64k window. Sweet spot is the
+  middle of that range; saturates near the top.
+- **`code-fast`** (Qwen2.5-Coder 3B + YaRN ×4) — **128k** window,
+  always-resident, free. Smaller models lean on explicit context rather
+  than priors, so they tend to *improve* relative to top-tier as the
+  conversation grows.
+
+First match wins:
 
 | # | Condition | → Model | Reason |
 |---|---|---|---|
 | 1 | last user msg contains `[nofilter]`, `[uncensored]`, `[heretic]`, or starts with `uncensored:` / `nofilter:` | `plan-uncensored` | explicit opt-in |
-| 2 | `tools` array non-empty | `code-smart` | tool-calling = agent |
-| 3 | ≥ 6 turns in `messages` | `code-smart` | multi-step agent loop |
-| 4 | estimated input > 4 000 tokens | `code-smart` | heavy context |
-| 5 | message contains ``` code block or agent verbs (*implement, fix bug, refactor, write a function, debug, ...*) | `code-smart` | actively editing code |
-| 6 | message contains plan verbs (*design, architect, approach, trade-off, should we, explain why, ...*) | `plan` | discussion / design |
-| 7 | otherwise | `code-fast` | trivial chat |
+| 2 | `[ultra]` / `[opus]` / `ultra:` trigger AND `code-ultra` tier configured | `code-ultra` | explicit top-tier opt-in |
+| 3 | plan verbs (*design, architect, approach, trade-off, should we, explain why, …*) AND no code blocks / agent verbs / tools | `plan` | pure design discussion (orthogonal track) |
+| 4 | estimated input ≤ 8 000 tokens | `code-ultra` *(or `code-smart` if ultra unwired)* | top tier — context still being built, latency/$ are best here |
+| 5 | estimated input ≤ 32 000 tokens | `code-smart` | mid-context, local heavy coder is at its sweet spot |
+| 6 | otherwise (long context) AND (`tools[]` OR ≥ 6 turns) | `code-smart` | floor: 3B model tool-calls unreliably |
+| 7 | otherwise (long context) | `code-fast` | 128k YaRN window + always-resident + free |
+
+Token estimates are `chars / 4` over all message text + `prompt`. The
+`code-ultra` rungs (2 and 4) are gated on availability: when no
+`[code-ultra]` section is loaded from `models.ini`, both silently fall
+back to `code-smart` so vanilla installs don't 404.
 
 ## opencode integration
 
@@ -422,12 +445,14 @@ All knobs are env vars; defaults are picked up by `llmstack start`.
 | Env var | Default | Meaning |
 |---|---|---|
 | `LLAMA_SWAP_URL` | `http://127.0.0.1:10102` | upstream llama-swap |
-| `ROUTER_FAST_MODEL` | `code-fast` | trivial chat → here |
-| `ROUTER_AGENT_MODEL` | `code-smart` | tools / heavy / agent verbs → here |
+| `ROUTER_FAST_MODEL` | `code-fast` | long-context (>= mid ceiling) → here |
+| `ROUTER_AGENT_MODEL` | `code-smart` | mid-context + tools/loop floor → here |
+| `ROUTER_ULTRA_MODEL` | `code-ultra` | short-context top tier → here (gated on availability) |
 | `ROUTER_PLAN_MODEL` | `plan` | design/discussion verbs → here |
 | `ROUTER_UNCENSORED_MODEL` | `plan-uncensored` | `[nofilter]` triggers → here |
-| `ROUTER_FAST_TOKEN_BUDGET` | `4000` | char-len /4 above which we escalate to agent |
-| `ROUTER_MULTI_TURN` | `6` | turn count above which we escalate to agent |
+| `ROUTER_HIGH_FIDELITY_CEILING` | `8000` | tokens; at or below this, route to top tier (ultra → smart fallback) |
+| `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast` |
+| `ROUTER_MULTI_TURN` | `6` | turn count that floors the long-context rung at `code-smart` |
 | `ROUTER_HOST` / `ROUTER_PORT` | `127.0.0.1` / `10101` | listen address |
 | `LOG_LEVEL` | `info` | router log level |
 
@@ -452,7 +477,7 @@ Triggers are *only* checked on the latest user message and the system prompt, so
 
 **OOM / unexplained slowdown** → run `top -o mem -stats pid,rsize,command` to see what's resident. The matrix should prevent two heavy models loading together; if it somehow happens, `llmstack restart`.
 
-**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`AGENT_SIGNALS` / `PLAN_SIGNALS` / `UNCENSORED_TRIGGERS`) or change `ROUTER_FAST_TOKEN_BUDGET`.
+**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`AGENT_SIGNALS` / `PLAN_SIGNALS` / `UNCENSORED_TRIGGERS`) or move the ladder ceilings via `ROUTER_HIGH_FIDELITY_CEILING` / `ROUTER_MID_FIDELITY_CEILING`. To force a request to never auto-route, pass an explicit `model` (e.g. `code-smart`) instead of `auto`.
 
 **Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names. (Note: this skips the bedrock dispatcher; only GGUF tiers will be reachable.)
 
@@ -471,9 +496,40 @@ aws_model_id = anthropic.claude-sonnet-4-5-20250929-v1:0
 aws_region   = us-west-2
 aws_profile  = bedrock-prod          ; named profile in ~/.aws/config
 ctx_size     = 200000
-sampler      = temp=0.5, top_p=0.85
+sampler      = temp=0.5    ; Sonnet 4.5 accepts ONE of temp / top_p
 description  = Claude Sonnet 4.5 on Bedrock - heavy coder for agent loops
 ```
+
+> **Sampler is per-tier, declared in `models.ini`, applied per backend.**
+> `opencode.json` is intentionally sampler-free in both cases — clients
+> just specify a model. How the sampler reaches the actual inference
+> engine depends on the backend:
+>
+> - **gguf tiers** — the llama-swap generator bakes each tier's
+>   `sampler = …` keys into its `llama-server` startup command line as
+>   `--temp` / `--top-p` / `--top-k` / `--min-p` / `--repeat-penalty`
+>   flags. llama-server applies them as its defaults for every request.
+>   The router doesn't touch the body.
+> - **Bedrock tiers** — Bedrock has no server-side defaults mechanism,
+>   so the router injects the sampler keys into each outbound request
+>   body (mapping `temp` → `temperature`, `top_p` → `topP`; the other
+>   llama.cpp-extension keys `top_k`/`min_p`/`rep_pen` are silently
+>   dropped because Converse doesn't accept them). Caller-supplied
+>   values in the request body still win for per-call overrides.
+>
+> Per-Bedrock-family rules (declare only what your Bedrock model
+> accepts):
+>
+> | Bedrock model family | What `sampler` may contain |
+> |---|---|
+> | Claude Opus 4.7+ | (omit `sampler =` entirely — Opus 4.7 rejects all sampler params) |
+> | Claude Sonnet 4.5 / Haiku 4.5 | `temp` **or** `top_p`, never both |
+> | Claude Opus 4.x (4.1, 4.5, 4.6) | `temp` and/or `top_p` |
+> | Llama / Titan / Cohere / etc. | `temp` and/or `top_p` (check the model card) |
+>
+> Local gguf tiers accept the full set (`temp`, `top_p`, `top_k`,
+> `min_p`, `rep_pen`) — llama-server honours all of them as startup
+> defaults.
 
 `models.ini` is meant to be committable, so it **only names a profile**.
 Credentials, SSO, role chaining, MFA — everything boto3 normally

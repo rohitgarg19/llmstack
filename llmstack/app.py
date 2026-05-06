@@ -14,7 +14,7 @@ Behaviour:
   ``POST /v1/completions``
     - if request body ``model == "auto"`` (or unset), classify the request
       and rewrite ``model`` -> one of: ``code-fast``, ``code-smart``,
-      ``plan``, ``plan-uncensored``.
+      ``code-ultra`` (when wired), ``plan``, ``plan-uncensored``.
     - otherwise pass through unchanged.
     - tiers with ``backend = bedrock`` in ``models.ini`` are dispatched
       to AWS Bedrock via :mod:`llmstack.backends.bedrock` instead of
@@ -22,35 +22,59 @@ Behaviour:
 * Streaming (SSE) responses are forwarded chunk-by-chunk.
 * Anything else is reverse-proxied.
 
+Routing philosophy: **start at the top of the fidelity ladder and
+step DOWN as context grows**. This inverts the classic
+"escalate-on-size" pattern, and it's deliberate:
+
+  * Top-tier hosted models (Claude Opus/Sonnet on Bedrock) are
+    fastest *and* most accurate on short prompts, but their
+    per-request latency and $cost scale with input tokens, and
+    long-context performance degrades faster than headline
+    benchmarks suggest.
+  * The local heavy coder (``code-smart``, Qwen3-Coder 80B-A3B) has
+    a 64k window -- it does its best work in the middle of that
+    range, and saturates near the top.
+  * The always-resident fast coder (``code-fast``, Qwen2.5-Coder 3B
+    with YaRN x4) has a **128k** window, costs nothing, and benefits
+    from more context: small models lean on retrieval / explicit
+    examples to disambiguate, where bigger models would just guess
+    from priors.
+
+So as the conversation accumulates context, we step *down*: ultra
+-> smart -> fast. Triggers and the plan track sit alongside this
+ladder.
+
 Routing decision tree (first match wins):
 
   1. Explicit "uncensored" trigger in the last user message
-     (e.g. starts with ``[nofilter]``, ``uncensored:``, or contains
-     ``[uncensored]``)                                   -> plan-uncensored
+     (``[nofilter]``, ``[uncensored]``, ``[heretic]``, or a line
+     starting with ``uncensored:`` / ``nofilter:``) -> plan-uncensored
   2. Explicit "ultra" trigger (``[ultra]``, ``[opus]``,
-     ``ultra:``, ``opus:``) AND ultra tier configured    -> code-ultra
-  3. Tools array non-empty (agent / function-calling)    -> code-smart
-  4. >= MULTI_TURN_THRESHOLD turns (agent loop)          -> code-smart
-  5. Estimated input tokens > ULTRA_TOKEN_BUDGET AND
-     ultra tier configured                               -> code-ultra
-  6. Estimated input tokens > FAST_TOKEN_BUDGET          -> code-smart
-  7. Code blocks (triple-backticks) or AGENT signal words -> code-smart
-     (``implement``, ``fix bug``, ``write a function``,
-     ``refactor``, ``debug``, ...)
-  8. PLAN signal words                                   -> plan
-     (``design``, ``architect``, ``approach``,
-     ``trade-off``, ``should we``, ...)
-  9. default                                             -> code-fast
+     ``ultra:``, ``opus:``) AND ultra tier configured -> code-ultra
+  3. PLAN signal words AND no code-block / agent verbs / tools
+     (design discussion, no implementation pending)   -> plan
+  4. Estimated input tokens <= HIGH_FIDELITY_CEILING
+     ("reasonable context still being built")         -> code-ultra
+                                                         (else code-smart)
+  5. Estimated input tokens <= MID_FIDELITY_CEILING   -> code-smart
+  6. Otherwise (long context, top-tier becomes
+     expensive/slow, fast tier's 128k window is the
+     best fit and it's free)                          -> code-fast
+                                                         (floored at
+                                                          code-smart when
+                                                          ``tools[]`` is set
+                                                          or n_turns >=
+                                                          MULTI_TURN_THRESHOLD,
+                                                          since 3B models
+                                                          tool-call unreliably)
 
-Ultra-tier routing is gated on availability: every escalation to
-``code-ultra`` first checks that the tier is loaded from
-``models.ini`` (i.e. present in :data:`TIER_BY_ALIAS`). When it
-isn't, the router silently falls back to the same target the rule
-would have picked without ultra (``code-smart`` for the trigger
-path, ``code-smart`` for the token-budget path) -- otherwise
-rewriting ``model`` to a tier name that isn't wired up surfaces as
-a 404 from llama-swap or a tier-not-found error from the bedrock
-dispatcher, which is just a confusing way to fail.
+Ultra-tier routing is gated on availability: rule (2) and the
+"high-fidelity" rung of (4) first check that the tier is loaded
+from ``models.ini`` (i.e. present in :data:`TIER_BY_ALIAS`). When
+it isn't, the router silently falls back to ``code-smart`` --
+otherwise rewriting ``model`` to a tier name that isn't wired up
+surfaces as a 404 from llama-swap or a tier-not-found error from
+the bedrock dispatcher, which is just a confusing way to fail.
 
 Run with::
 
@@ -81,12 +105,26 @@ ULTRA_MODEL = os.getenv("ROUTER_ULTRA_MODEL", "code-ultra")
 PLAN_MODEL = os.getenv("ROUTER_PLAN_MODEL", "plan")
 UNCENSORED_MODEL = os.getenv("ROUTER_UNCENSORED_MODEL", "plan-uncensored")
 
-FAST_TOKEN_BUDGET = int(os.getenv("ROUTER_FAST_TOKEN_BUDGET", "4000"))
-# Token estimate above which auto-routing escalates from code-smart to
-# code-ultra (only when ultra is configured). Default 32k -- roughly
-# half of the local 65k-ctx ceiling, where local-coder quality starts
-# degrading on long-context refactors. Tune via ROUTER_ULTRA_TOKEN_BUDGET.
-ULTRA_TOKEN_BUDGET = int(os.getenv("ROUTER_ULTRA_TOKEN_BUDGET", "32000"))
+# Step-DOWN ladder (see module docstring). Both ceilings are *upper
+# bounds* of a tier's sweet-spot range, expressed in estimated input
+# tokens (chars/4):
+#
+#   est <= HIGH_FIDELITY_CEILING  -> top tier (ultra, else smart)
+#   est <= MID_FIDELITY_CEILING   -> code-smart
+#   est >  MID_FIDELITY_CEILING   -> code-fast (or smart with tools/loop)
+#
+# Defaults:
+#   HIGH 8000  - "reasonable context built": a couple of files loaded,
+#                instructions clear, top-tier still cheap+fast here.
+#   MID  32000 - half of code-smart's 65k window; past this, hosted
+#                top-tier latency/$cost balloons and code-smart starts
+#                getting cramped, while code-fast's 128k YaRN window
+#                still has comfortable headroom.
+HIGH_FIDELITY_CEILING = int(os.getenv("ROUTER_HIGH_FIDELITY_CEILING", "8000"))
+MID_FIDELITY_CEILING = int(os.getenv("ROUTER_MID_FIDELITY_CEILING", "32000"))
+# Floor the long-context rung at code-smart whenever a tool-call
+# protocol is in play -- 3B models tool-call unreliably regardless of
+# how big their context window is.
 MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "6"))
 AUTO_ALIASES = {"auto", "", None}
 
@@ -129,7 +167,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("router")
 
-app = FastAPI(title="llmstack-auto-router", version="2.1")
+app = FastAPI(title="llmstack-auto-router", version="3.0")
 client: httpx.AsyncClient | None = None
 TIERS: dict[str, Tier] = {}
 TIER_BY_ALIAS: dict[str, Tier] = {}
@@ -162,9 +200,12 @@ async def _startup() -> None:
     client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
     bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
     log.info(
-        "router up upstream=%s fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
-        UPSTREAM, FAST_MODEL, AGENT_MODEL,
-        f"{ULTRA_MODEL} (active)" if _ultra_available() else f"{ULTRA_MODEL} (unwired -- triggers fall back to {AGENT_MODEL})",
+        "router up upstream=%s ladder=[ultra<=%d -> agent<=%d -> fast] "
+        "fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
+        UPSTREAM, HIGH_FIDELITY_CEILING, MID_FIDELITY_CEILING,
+        FAST_MODEL, AGENT_MODEL,
+        f"{ULTRA_MODEL} (active)" if _ultra_available()
+            else f"{ULTRA_MODEL} (unwired -- high-fidelity rung falls back to {AGENT_MODEL})",
         PLAN_MODEL, UNCENSORED_MODEL,
         ",".join(bedrock_tiers) or "(none)",
     )
@@ -228,21 +269,26 @@ def _ultra_available() -> bool:
     """True iff the ultra tier is loaded from ``models.ini``.
 
     Every auto-route to :data:`ULTRA_MODEL` is gated on this. Without
-    the guard, an explicit ``[ultra]`` trigger or a >ULTRA_TOKEN_BUDGET
-    request on a vanilla install (no ``code-ultra`` section) would
-    rewrite ``model`` to a tier that doesn't exist downstream --
-    llama-swap returns 404, the bedrock dispatcher raises -- so the
-    request would fail even though falling back to ``code-smart``
-    would have served it just fine. The check is a cheap dict lookup
-    so we run it on every classify invocation; that also means
-    re-indexing tiers at runtime (e.g. SIGHUP -> ``_index_tiers()``)
-    flips routing behaviour live without restarting the router.
+    the guard, an explicit ``[ultra]`` trigger or the high-fidelity
+    rung of the step-down ladder on a vanilla install (no
+    ``code-ultra`` section) would rewrite ``model`` to a tier that
+    doesn't exist downstream -- llama-swap returns 404, the bedrock
+    dispatcher raises -- so the request would fail even though
+    falling back to ``code-smart`` would have served it just fine.
+    The check is a cheap dict lookup so we run it on every classify
+    invocation; that also means re-indexing tiers at runtime (e.g.
+    SIGHUP -> ``_index_tiers()``) flips routing behaviour live
+    without restarting the router.
     """
     return ULTRA_MODEL in TIER_BY_ALIAS
 
 
 def classify(body: dict[str, Any]) -> tuple[str, str]:
-    """Return (chosen_model, reason)."""
+    """Return (chosen_model, reason).
+
+    Step-DOWN ladder: top fidelity for short context, fall to mid for
+    medium, drop to fast for long. See module docstring for rationale.
+    """
     messages = body.get("messages") if isinstance(body.get("messages"), list) else None
     prompt = body.get("prompt") if isinstance(body.get("prompt"), str) else None
 
@@ -265,29 +311,46 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
                     ULTRA_MODEL, AGENT_MODEL)
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
-    tools = body.get("tools") or []
-    if tools:
-        return AGENT_MODEL, f"tools={len(tools)}"
-
+    has_tools = bool(body.get("tools"))
     n_turns = len(messages) if messages else 0
-    if n_turns >= MULTI_TURN_THRESHOLD:
-        return AGENT_MODEL, f"turns={n_turns}"
+    has_code_signal = (
+        _matches(CODE_BLOCK, messages, prompt)
+        or _matches(AGENT_SIGNALS, messages, prompt)
+    )
 
-    est = _estimate_tokens(messages, prompt)
-    if est > ULTRA_TOKEN_BUDGET and _ultra_available():
-        return ULTRA_MODEL, f"tokens~{est}>ultra-budget={ULTRA_TOKEN_BUDGET}"
-    if est > FAST_TOKEN_BUDGET:
-        return AGENT_MODEL, f"tokens~{est}"
-
-    if _matches(CODE_BLOCK, messages, prompt):
-        return AGENT_MODEL, "code-block"
-    if _matches(AGENT_SIGNALS, messages, prompt):
-        return AGENT_MODEL, "agent-signal"
-
-    if _matches(PLAN_SIGNALS, messages, prompt):
+    # Plan track is orthogonal to the code fidelity ladder: ``plan`` is a
+    # chat-tuned model meant for design / "should we" discussions. Only
+    # take it when nothing about the request says "I'm about to write
+    # code" (no triple-backticks, no agent verbs, no tool calls).
+    if (
+        not has_tools
+        and not has_code_signal
+        and _matches(PLAN_SIGNALS, messages, prompt)
+    ):
         return PLAN_MODEL, "plan-signal"
 
-    return FAST_MODEL, "default"
+    est = _estimate_tokens(messages, prompt)
+
+    # Rung 1: short context -- start at the top.
+    if est <= HIGH_FIDELITY_CEILING:
+        if _ultra_available():
+            return ULTRA_MODEL, f"high-fidelity tokens~{est}<={HIGH_FIDELITY_CEILING}"
+        return AGENT_MODEL, (
+            f"high-fidelity tokens~{est}<={HIGH_FIDELITY_CEILING} "
+            f"({ULTRA_MODEL} unavailable)"
+        )
+
+    # Rung 2: mid context -- local heavy coder is at its sweet spot.
+    if est <= MID_FIDELITY_CEILING:
+        return AGENT_MODEL, f"mid-fidelity tokens~{est}<={MID_FIDELITY_CEILING}"
+
+    # Rung 3: long context -- step down to fast (128k YaRN, free,
+    # always-resident). Floor at smart when tools/agent loop is in
+    # play; the 3B coder doesn't tool-call reliably.
+    if has_tools or n_turns >= MULTI_TURN_THRESHOLD:
+        why = "tools" if has_tools else f"turns={n_turns}"
+        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} ({why} floor)"
+    return FAST_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING}"
 
 
 # ----------------------------- proxy plumbing ------------------------------
@@ -385,25 +448,32 @@ async def list_models() -> JSONResponse:
                 data["data"].append(desc)
                 seen.add(alias)
 
-    ultra_blurb = (
-        f" '{ULTRA_MODEL}' for [ultra]/[opus] triggers and >{ULTRA_TOKEN_BUDGET}-token inputs,"
-        if _ultra_available() else ""
-    )
+    if _ultra_available():
+        top_blurb = (
+            f"Step-down ladder (top->bottom as context grows): "
+            f"'{ULTRA_MODEL}' up to ~{HIGH_FIDELITY_CEILING} tokens, "
+            f"'{AGENT_MODEL}' up to ~{MID_FIDELITY_CEILING}, "
+            f"'{FAST_MODEL}' beyond that."
+        )
+        name = "Auto (step-down router: ultra/agent/fast + plan/uncensored)"
+    else:
+        top_blurb = (
+            f"Step-down ladder (top->bottom as context grows): "
+            f"'{AGENT_MODEL}' up to ~{MID_FIDELITY_CEILING} tokens, "
+            f"'{FAST_MODEL}' beyond that."
+        )
+        name = "Auto (step-down router: agent/fast + plan/uncensored)"
     data["data"].insert(0, {
         "id": "auto",
         "object": "model",
         "created": 0,
         "owned_by": "router",
-        "name": (
-            "Auto (router: fast/agent/ultra/plan/uncensored)" if _ultra_available()
-            else "Auto (router: fast/agent/plan/uncensored)"
-        ),
+        "name": name,
         "description": (
-            f"Routes to '{FAST_MODEL}' for trivial chat, "
-            f"'{AGENT_MODEL}' for code/agent work,"
-            f"{ultra_blurb} "
-            f"'{PLAN_MODEL}' for design/planning, "
-            f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers."
+            f"{top_blurb} "
+            f"'{PLAN_MODEL}' for design/planning (orthogonal to ladder); "
+            f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers; "
+            f"'[ultra]'/'[opus]' triggers force '{ULTRA_MODEL}' regardless of size."
         ),
         "tier": "auto",
     })
@@ -416,6 +486,52 @@ def _resolve_tier(name: str | None) -> Tier | None:
     return TIER_BY_ALIAS.get(name)
 
 
+# Map the short sampler keys used in models.ini to the OpenAI-compatible
+# request-body fields that downstream backends understand. llama.cpp
+# accepts `top_k`, `min_p`, and `repetition_penalty` as extensions; the
+# Bedrock backend ignores fields it can't translate to Converse.
+_SAMPLER_BODY_FIELD = {
+    "temp":    "temperature",
+    "top_p":   "top_p",
+    "top_k":   "top_k",
+    "min_p":   "min_p",
+    "rep_pen": "repetition_penalty",
+}
+
+
+def _inject_sampler(body: dict[str, Any], tier: Tier) -> bool:
+    """Layer this tier's `sampler = ...` defaults onto the request body.
+
+    **Bedrock-only.** For gguf tiers, sampling defaults are baked into
+    the llama-server startup command line by
+    :mod:`llmstack.generators.llama_swap`, so llama-server already
+    applies them for any request whose body lacks an explicit value.
+    Bedrock has no equivalent server-side mechanism -- the only place to
+    apply per-tier sampling for hosted models is the outbound request
+    body, which is what this function does.
+
+    Caller-supplied values always win -- if the client already set
+    `temperature`, the tier default does not overwrite it. This makes
+    models.ini the source of truth for "what sampler does each tier
+    use", while still letting power users override per call.
+
+    Returns ``True`` iff anything was added (the caller re-encodes the
+    raw body bytes only when the dict actually changed).
+
+    A Bedrock tier with an empty sampler dict (no `sampler =` line, or
+    all keys stripped) is a no-op -- the canonical pattern for Bedrock
+    families like Claude Opus 4.7 that reject every sampler param.
+    """
+    if not tier.is_bedrock or not tier.sampler:
+        return False
+    mutated = False
+    for src, dst in _SAMPLER_BODY_FIELD.items():
+        if src in tier.sampler and dst not in body:
+            body[dst] = tier.sampler[src]
+            mutated = True
+    return mutated
+
+
 async def _handle_completion(req: Request, path: str) -> Response:
     raw = await req.body()
     headers = _filter_request_headers(req)
@@ -425,15 +541,22 @@ async def _handle_completion(req: Request, path: str) -> Response:
     except json.JSONDecodeError:
         return await _stream_proxy(req.method, path, raw, headers)
 
+    mutated = False
     requested = body.get("model")
     if requested in AUTO_ALIASES or requested == "auto":
         chosen, reason = classify(body)
         body["model"] = chosen
         log.info("auto -> %s (%s) [path=%s]", chosen, reason, path)
-        raw = json.dumps(body).encode()
+        mutated = True
 
     chosen_name = body.get("model")
     tier = _resolve_tier(chosen_name)
+    if tier is not None and _inject_sampler(body, tier):
+        mutated = True
+
+    if mutated:
+        raw = json.dumps(body).encode()
+
     if tier is not None and tier.is_bedrock:
         from llmstack.backends import bedrock as bedrock_backend
         return await bedrock_backend.dispatch(req, tier, body)
