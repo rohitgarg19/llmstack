@@ -13,7 +13,7 @@
 #
 # PyPI setup (one-time)
 # ─────────────────────
-# 1. Go to https://pypi.org/manage/project/llmstack/settings/publishing/
+# 1. Go to https://pypi.org/manage/project/opencode-llmstack/settings/publishing/
 # 2. Add a new "pending publisher" (or edit the existing publisher):
 #    - Owner:       rohitgarg19
 #    - Repository:  llmstack
@@ -96,7 +96,7 @@ jobs:
     needs: build
     environment:
       name: release
-      url: https://pypi.org/project/llmstack/
+      url: https://pypi.org/project/opencode-llmstack/
     permissions:
       id-token: write   # required for OIDC trusted publishing
 
@@ -132,6 +132,6 @@ jobs:
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          name: "llmstack ${{ github.ref_name }}"
+          name: "opencode-llmstack ${{ github.ref_name }}"
           generate_release_notes: true
           files: dist/*
