@@ -17,7 +17,11 @@ Three classes of path are kept apart on purpose:
     Generated configs, pid files, channel markers, prompt rcfiles and
     daemon logs. Lives at ``<work-dir>/.llmstack/`` so each project gets
     its own ``opencode.json`` + ``llama-swap.yaml``. ``work-dir`` is
-    ``$LLMSTACK_WORK_DIR`` if set, else ``$PWD`` at invocation time.
+    ``$LLMSTACK_WORK_DIR`` if set, else ``$PWD``. The activate hook +
+    ``spawn_subshell`` are responsible for exporting ``LLMSTACK_WORK_DIR``
+    when the user is "inside" a project, so ``llmstack <action>`` works
+    from any subdirectory; outside the hook, the user is expected to be
+    in the project root (or set the env var explicitly).
 
 The state-dir resolution uses a frozen :class:`Paths` instance constructed
 once per CLI invocation so we don't accidentally pick up a different
@@ -101,7 +105,16 @@ def models_ini_path() -> Path:
 
 
 def work_dir() -> Path:
-    """Where per-project state (``.llmstack/``) lives."""
+    """Where per-project state (``.llmstack/``) lives.
+
+    ``$LLMSTACK_WORK_DIR`` if set, else ``$PWD``. The activate hook
+    walks up from the user's prompt to find the nearest installed
+    project (``.llmstack/opencode.json``) and exports
+    ``LLMSTACK_WORK_DIR`` so the CLI works from any subdirectory; the
+    spawned subshell does the same. We don't redo that walk here -- the
+    hook is the source of truth, and a user who hasn't installed it is
+    expected to be in the project root.
+    """
     raw = os.environ.get("LLMSTACK_WORK_DIR")
     return Path(raw).expanduser().resolve() if raw else Path.cwd().resolve()
 

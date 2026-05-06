@@ -18,7 +18,7 @@ import shutil
 import subprocess
 
 from llmstack._platform import IS_WINDOWS, shell_family
-from llmstack.commands import activate as activate_cmd
+from llmstack.commands.activate import write_hook
 from llmstack.download.binary import install_llama_swap
 from llmstack.download.ggufs import download_all, wait_for_downloads
 from llmstack.paths import is_remote, remote_url
@@ -78,24 +78,24 @@ def run(args: list[str]) -> int:
     print()
     if family in ("bash", "zsh"):
         rc_hint = f"~/.{shell_name}rc"
-        eval_line = f'eval "$(llmstack activate {shell_name})"'
         hook_arg = shell_name
     elif family == "powershell":
         rc_hint = "$PROFILE"
-        eval_line = 'Invoke-Expression (& llmstack activate powershell | Out-String)'
         hook_arg = "powershell"
     else:
         rc_hint = "your shell rc file"
-        eval_line = "(no auto-activation hook for this shell yet)"
         hook_arg = None
 
-    print(f"Add the following line to {rc_hint} to auto-activate")
-    print("llmstack whenever you cd into a project with .llmstack/:")
-    print()
-    print(f"    {eval_line}")
-    print()
+    eval_line: str | None = None
     if hook_arg is not None:
-        activate_cmd.run([hook_arg])
+        path, _src = write_hook(hook_arg)
+        eval_line = f'eval "$(llmstack activate {hook_arg})"'
+        print(f"[OK] hook installed: {path}")
+        print()
+        print("To turn it on in this shell now (and persist across new shells, paste")
+        print(f"the same line into {rc_hint}):")
+        print()
+        print(f"    {eval_line}")
 
     print()
     print("[5/5] checking opencode...")
@@ -134,9 +134,12 @@ def run(args: list[str]) -> int:
     print("[OK] setup complete.")
     print()
     print("Next steps:")
-    print(f"  1. Add the eval line above to {rc_hint} (one time)")
+    if eval_line is not None:
+        print(f"  1. Run (and paste into {rc_hint} for persistence): {eval_line}")
+    else:
+        print("  1. Source the generated hook in your shell rc (see above)")
     print("  2. llmstack install     # generate .llmstack/ configs for this project")
-    print("  3. llmstack start       # bring up the stack + enter the shell")
+    print("  3. llmstack start       # bring up the stack")
     print()
     print("To check configured GGUFs + drift vs models.ini:")
     print("  llmstack check")

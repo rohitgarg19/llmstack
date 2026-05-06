@@ -109,15 +109,18 @@ def _start_remote(detach: bool) -> int:
     if detach:
         return 0
 
+    # Same "spawn only when no active env" rule as the local-mode path.
     if os.environ.get("LLMSTACK_ACTIVE") == "1":
-        if os.environ.get("LLMSTACK_CHANNEL") == "external":
-            print("[=] already in an 'external' llmstack shell -- no reload needed.")
-            return 0
-        print(
-            f"[*] switching to external client ({os.environ.get('LLMSTACK_CHANNEL')} -> external); "
-            "reloading shell..."
-        )
-        spawn_subshell("external", reload=True)
+        cur_chan = os.environ.get("LLMSTACK_CHANNEL", "?")
+        if cur_chan == "external":
+            print("[=] already active as external client -- env is up to date.")
+        else:
+            print(
+                f"[*] switching to external client ({cur_chan} -> external); env in "
+                "this shell is now stale."
+            )
+            print("    refresh prompt + env in this shell:")
+            print('        eval "$(llmstack reload)"')
         return 0
 
     spawn_subshell("external")
@@ -291,19 +294,29 @@ def run(args: list[str]) -> int:
     if detach:
         return 0
 
-    # spawn_subshell expects the channel as written into active-marker so the
-    # prompt prefix matches reality. For shared daemons we keep the *real*
-    # local channel ("current"/"next") since the env we're entering is
-    # genuinely on that channel from this project's POV.
+    # Only spawn a subshell when the env isn't already wired up. Two cases:
+    #   - Hook installed + sourced: cd-ing into a project sets
+    #     LLMSTACK_ACTIVE=1 and friends. start just brings up daemons --
+    #     no need to nest another shell.
+    #   - Inside a previously-spawned llmstack shell: same deal.
+    # For users who haven't run `eval "$(llmstack activate <shell>)"`,
+    # spawn so they at least get OPENCODE_CONFIG / channel exports for
+    # this terminal.
     if os.environ.get("LLMSTACK_ACTIVE") == "1":
-        if os.environ.get("LLMSTACK_CHANNEL") == channel:
-            print(f"[=] already in the '{channel}' llmstack shell -- no reload needed.")
-            return 0
-        print(
-            f"[*] channel changed ({os.environ.get('LLMSTACK_CHANNEL')} -> {channel}); "
-            "reloading shell..."
-        )
-        spawn_subshell(channel, reload=True)
+        cur_chan = os.environ.get("LLMSTACK_CHANNEL", "?")
+        if cur_chan == channel:
+            print(f"[=] already active in '{channel}' -- env is up to date.")
+        else:
+            # Daemons + active-channel marker are already on the new
+            # channel. The current shell's env + PROMPT lag behind --
+            # `llmstack reload` emits the eval-able snippet to fix that
+            # without nesting a subshell.
+            print(
+                f"[*] channel switched ({cur_chan} -> {channel}); env in this shell "
+                "is now stale."
+            )
+            print("    refresh prompt + env in this shell:")
+            print('        eval "$(llmstack reload)"')
         return 0
 
     spawn_subshell(channel)

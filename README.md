@@ -138,9 +138,10 @@ your global setup unchanged.
 Inside opencode you can switch agents with `/agent` or by `@plan-nofilter`-mentioning
 a custom one. Slash-commands `/review`, `/nofilter` are also available.
 
-Want a second terminal into the same stack? `llmstack shell` spawns
-another env-prepared subshell without touching the daemons. Want to run
-opencode without the subshell? `OPENCODE_CONFIG=$PWD/.llmstack/opencode.json opencode`
+Want a second terminal into the same stack? Install the activate hook
+once (`eval "$(llmstack activate zsh)"`) and any new shell that `cd`s
+into the project picks up `OPENCODE_CONFIG` automatically. Want to run
+opencode without the hook? `OPENCODE_CONFIG=$PWD/.llmstack/opencode.json opencode`
 from any directory you previously ran `install` in.
 
 ## Layout
@@ -229,19 +230,21 @@ llmstack setup
 llmstack install
 
 # 4. Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
-#    llama-swap + router, AND drop into a subshell with OPENCODE_CONFIG
-#    pointed at .llmstack/opencode.json. Prompt is prefixed with
-#    [llmstack:current]. Run `opencode` from this subshell. Daemons keep
-#    running when you exit; stop them with `llmstack stop`.
+#    llama-swap + router. With the activate hook installed (see below),
+#    your prompt is already wired to .llmstack/opencode.json -- just run
+#    `opencode`. Without the hook, `start` falls back to spawning a
+#    subshell with OPENCODE_CONFIG set, prefixed with [llmstack:current].
+#    Daemons keep running when you exit; stop them with `llmstack stop`.
 llmstack start
 
-# 4a. Same thing but no subshell (daemons only, return immediately).
+# 4a. Daemons only (no fallback subshell, return immediately).
 llmstack start --detach
 
-# 4b. Already running? Open another terminal into the same env:
-llmstack shell
+# 4b. Want auto-activation in any new terminal you cd into? Install once:
+eval "$(llmstack activate zsh)"
+# add the same line to ~/.zshrc to make it stick.
 
-# 5. Sanity check (works from any terminal; doesn't need the subshell)
+# 5. Sanity check (works from any terminal)
 llmstack status
 curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
 ```
@@ -266,12 +269,14 @@ py -3 -m venv .venv
 .venv\Scripts\llmstack install
 
 # 3. Generate .llmstack\llama-swap.yaml for the chosen channel, bring up
-#    the stack, and drop into a PowerShell subshell wired to it.
+#    the stack. If you've installed the activate hook (step 4) the
+#    current shell is already wired to .llmstack\opencode.json; otherwise
+#    `start` falls back to spawning a PowerShell subshell.
 .venv\Scripts\llmstack start
 
 # 4. Auto-activate per project from any new PowerShell window:
 Invoke-Expression (& llmstack activate powershell | Out-String)
-# or persist:
+# or persist (writes ~/.powershell_llmstack_hook + sources it on every shell):
 "Invoke-Expression (& llmstack activate powershell | Out-String)" | Add-Content $PROFILE
 ```
 
@@ -304,9 +309,10 @@ export LLMSTACK_REMOTE_URL=http://10.0.0.5:10101
 llmstack install      # writes .llmstack/opencode.json (baseURL = remote/v1)
                       # and .llmstack/default-channel = "external <url>"
                       # (no llama-swap.yaml -- the remote owns that)
-llmstack start        # verifies http://10.0.0.5:10101/health, enters subshell
-                      # prompt is medium-purple and shows the URL:
-                      #   [llmstack:opencode http://10.0.0.5:10101]
+llmstack start        # verifies http://10.0.0.5:10101/health
+                      # (with the activate hook installed, your prompt
+                      # is already medium-purple with the URL:
+                      #   [llmstack:opencode http://10.0.0.5:10101])
 opencode              # talks straight to the remote router
 ```
 
@@ -327,10 +333,11 @@ request; the client just provides hints.)
 
 ### Auto-activate per project
 
-Once you have a `.llmstack/` in a project, you can have your shell
-auto-export `OPENCODE_CONFIG` and friends whenever you `cd` into that
-tree. Drop the eval line into your rc once and forget about
-`llmstack shell` forever:
+`llmstack activate <shell>` writes the hook to
+`~/.<shell>_llmstack_hook` and prints a `source` line to stdout, so a
+single `eval` both regenerates the file and turns the hook on in your
+current shell. Pasting the same `eval` into your rc keeps it on for
+every new shell:
 
 ```bash
 # ~/.zshrc (zsh)
@@ -339,6 +346,12 @@ eval "$(llmstack activate zsh)"
 # or ~/.bashrc (bash)
 eval "$(llmstack activate bash)"
 ```
+
+With the hook installed, `cd` into any project that has a `.llmstack/`
+and your shell is wired up automatically — `OPENCODE_CONFIG`,
+`LLMSTACK_WORK_DIR`, `LLMSTACK_CHANNEL` (and `LLMSTACK_REMOTE_URL` for
+external projects) all toggle on/off as you walk in and out. There is
+no separate `llmstack shell` command — this is the shell command.
 
 ### Common partial flows
 

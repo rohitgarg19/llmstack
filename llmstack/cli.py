@@ -24,9 +24,10 @@ llmstack - multi-tier local LLM stack (llama-swap + auto-router + opencode wirin
 
 Does NOT touch ~/.config/opencode/opencode.json. Instead, the generated
 opencode config lives at <work-dir>/.llmstack/opencode.json, and the
-`start` and `shell` actions drop you into a subshell with OPENCODE_CONFIG
-pointed at it. Inside that subshell, `opencode` picks up our config; in
-any other terminal, opencode keeps using your global setup unchanged.
+activate hook (`llmstack activate <shell>`) auto-exports OPENCODE_CONFIG
+whenever you cd into a project that has a `.llmstack/`. Inside that
+hooked shell, `opencode` picks up our config; in any other terminal,
+opencode keeps using your global setup unchanged.
 
 Usage:
   llmstack <action> [options]
@@ -54,34 +55,53 @@ Actions:
 
   start [--current | --next] [--detach]
       Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
-      llama-swap (:10102) + auto-router (:10101) AND drop into a subshell
-      with OPENCODE_CONFIG set. Default channel = whatever `install`
-      pinned, else `current`. `--next` swaps any tier with hf_file_next.
-      `--detach` skips the subshell. The yaml is regenerated on each
-      fresh launch so it always matches the live models.ini; if the
-      daemons are already up the running yaml is left alone.
+      llama-swap (:10102) + auto-router (:10101). Default channel =
+      whatever `install` pinned, else `current`. `--next` swaps any tier
+      with hf_file_next. The yaml is regenerated on each fresh launch
+      so it always matches the live models.ini; if the daemons are
+      already up the running yaml is left alone.
 
-      When LLMSTACK_REMOTE_URL is set, no daemons are launched: this just
-      verifies the remote /health endpoint and drops into a client
-      subshell (channel: external).
+      Subshell behaviour: if LLMSTACK_ACTIVE is already set (i.e. the
+      activate hook has wired this shell up) `start` just brings up
+      daemons and returns. Only when the env is not set does `start`
+      drop you into a subshell with OPENCODE_CONFIG exported -- as a
+      fallback for users who haven't run the activate hook yet.
+      `--detach` skips the subshell unconditionally.
 
-  shell
-      Drop into the env-prepared subshell without (re)starting daemons.
-      Useful for opening more terminals into the same stack.
+      When LLMSTACK_REMOTE_URL is set, no daemons are launched: this
+      just verifies the remote /health endpoint (channel: external).
 
-  activate <zsh|bash>
-      Print shell hook code that auto-activates llmstack whenever you cd
-      into a project that has a `.llmstack/` dir (or any subdir of one).
-      Drop the eval into your rc file once and forget about
-      `llmstack shell` forever:
+  activate <zsh|bash|powershell>
+      Write the auto-activation hook to ~/.<shell>_llmstack_hook and
+      print a `source` line to stdout, so
+
+          eval "$(llmstack activate zsh)"
+
+      both regenerates the file and turns the hook on in the current
+      shell. Paste the same line into your shell rc to make it stick:
           # ~/.zshrc
           eval "$(llmstack activate zsh)"
+      The hook walks up from $PWD on every prompt, finds the nearest
+      .llmstack/opencode.json, and exports OPENCODE_CONFIG +
+      LLMSTACK_WORK_DIR + LLMSTACK_CHANNEL accordingly. Walks back out
+      when you cd away. There is no separate `shell` action -- this is
+      the shell action.
 
   stop
       Stop the router + llama-swap (and any orphaned llama-server children).
 
   restart [--current | --next] [--detach]
       stop + start. Convenient for cycling channels.
+
+  reload
+      Emit shell commands that re-export LLMSTACK_CHANNEL +
+      OPENCODE_CONFIG and re-render the [llmstack:<project>] prompt
+      prefix for the current channel marker. Pipe through eval to
+      apply in-place (no nested subshell):
+          eval "$(llmstack reload)"
+      Useful after `start --next` switches channels in an
+      already-active shell -- the activate hook only refreshes on
+      chpwd, so without this the prompt would lag until your next cd.
 
   status
       Show channel, pids, /v1/models, loaded llama-server processes.
@@ -102,24 +122,28 @@ Environment overrides:
                           becomes a thin client: no daemons, no llama-swap
                           binary, no GGUFs. `install` writes opencode.json
                           with baseURL pointing at the remote, and `start`
-                          just verifies the remote and enters the
-                          client subshell (LLMSTACK_CHANNEL=external).
+                          just verifies the remote (channel: external).
                           `setup`, `download`, `install-llama-swap` are
                           local-only and refuse when this is set.
   LLMSTACK_MODELS_INI     path to models.ini (default:
                           <work-dir>/.llmstack/models.ini).
-  LLMSTACK_WORK_DIR       where .llmstack/ + logs/ go (default: $PWD when
-                          invoked). `cd` into any project and run `llmstack
-                          start` -- the per-project .llmstack/ is created
-                          right there. Local daemons are singleton (ports
-                          10101/10102) and shared across projects.
+  LLMSTACK_WORK_DIR       where .llmstack/ + logs/ live (default: $PWD
+                          when invoked). Auto-exported by the activate
+                          hook (`llmstack activate <shell>`) and by the
+                          subshell `start` spawns, set to the project
+                          root -- so commands work from any subdirectory
+                          of an installed project. Without the hook,
+                          run from the project root (or set this var).
+                          Local daemons are singleton (ports 10101/10102)
+                          and shared across projects.
   LLMSTACK_DATA_DIR       persistent user-data root (default:
                           $XDG_DATA_HOME/llmstack). Where the binary lives.
   LLMSTACK_BIN_DIR        override just the binary location.
   OPENCODE_CONFIG_DIR     where to write opencode.json (default: .llmstack/).
   LLAMA_SWAP_VERSION      pin a specific llama-swap release (e.g. v211).
   HF_TOKEN                authenticate model downloads (faster rate limits).
-  LLMSTACK_SHELL          shell to spawn in `start`/`shell` (default: $SHELL).
+  LLMSTACK_SHELL          shell to spawn from `start` when no active env
+                          is detected (default: $SHELL).
 
 Channel labels (LLMSTACK_CHANNEL):
   current    local stack, canonical channel (steel-blue prompt prefix)
@@ -136,11 +160,14 @@ Channel markers on disk (.llmstack/active-channel, .llmstack/default-channel):
   LLMSTACK_REMOTE_URL when you cd into the project, so you don't have to
   put the URL in your shell rc.
 
-Variables exported into the spawned subshell:
+Variables exported by the activate hook (and the start fallback subshell):
   OPENCODE_CONFIG         path to the generated .llmstack/opencode.json
+  LLMSTACK_WORK_DIR       absolute path to the project root (auto-detected
+                          by walking up from $PWD looking for .llmstack/)
   LLMSTACK_CHANNEL        current | next | external | shared
-  LLMSTACK_ACTIVE         "1" while inside the subshell
-  LLMSTACK_ROOT           absolute path to the llmstack package
+  LLMSTACK_ACTIVE         "1" while the env is wired up
+  LLMSTACK_REMOTE_URL     set when channel == external, from the marker file
+  LLMSTACK_ROOT           absolute path to the llmstack package (start only)
 """
 
 
