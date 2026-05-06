@@ -89,6 +89,7 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -167,7 +168,28 @@ logging.basicConfig(
 )
 log = logging.getLogger("router")
 
-app = FastAPI(title="llmstack-auto-router", version="3.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global client
+    timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
+    client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
+    bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
+    log.info(
+        "router up upstream=%s ladder=[ultra<=%d -> agent<=%d -> fast] "
+        "fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
+        UPSTREAM, HIGH_FIDELITY_CEILING, MID_FIDELITY_CEILING,
+        FAST_MODEL, AGENT_MODEL,
+        f"{ULTRA_MODEL} (active)" if _ultra_available()
+            else f"{ULTRA_MODEL} (unwired -- high-fidelity rung falls back to {AGENT_MODEL})",
+        PLAN_MODEL, UNCENSORED_MODEL,
+        ",".join(bedrock_tiers) or "(none)",
+    )
+    yield
+    if client:
+        await client.aclose()
+
+
+app = FastAPI(title="llmstack-auto-router", version="3.0", lifespan=_lifespan)
 client: httpx.AsyncClient | None = None
 TIERS: dict[str, Tier] = {}
 TIER_BY_ALIAS: dict[str, Tier] = {}
@@ -191,30 +213,6 @@ def _index_tiers() -> None:
 
 
 _index_tiers()
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    global client
-    timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
-    client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
-    bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
-    log.info(
-        "router up upstream=%s ladder=[ultra<=%d -> agent<=%d -> fast] "
-        "fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
-        UPSTREAM, HIGH_FIDELITY_CEILING, MID_FIDELITY_CEILING,
-        FAST_MODEL, AGENT_MODEL,
-        f"{ULTRA_MODEL} (active)" if _ultra_available()
-            else f"{ULTRA_MODEL} (unwired -- high-fidelity rung falls back to {AGENT_MODEL})",
-        PLAN_MODEL, UNCENSORED_MODEL,
-        ",".join(bedrock_tiers) or "(none)",
-    )
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    if client:
-        await client.aclose()
 
 
 # ----------------------------- routing logic -------------------------------
