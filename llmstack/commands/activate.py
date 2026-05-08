@@ -28,18 +28,40 @@ def _print_help() -> None:
     print("usage: llmstack activate <zsh|bash|powershell>", file=sys.stderr)
 
 
+def _is_powershell(shell: str) -> bool:
+    return shell in ("powershell", "pwsh")
+
+
 def _hook_path(shell: str) -> Path:
     """``~/.<shell>_llmstack_hook`` -- ``pwsh`` is normalised to ``powershell``
-    so the user doesn't end up with two redundant files."""
-    name = "powershell" if shell in ("powershell", "pwsh") else shell
-    return Path.home() / f".{name}_llmstack_hook"
+    so the user doesn't end up with two redundant files.
+
+    PowerShell additionally needs a ``.ps1`` suffix or the host won't
+    dot-source it -- without the extension Windows hands the file to
+    the OS shell file-association (Notepad, etc.) instead of running
+    it as a script.
+    """
+    if _is_powershell(shell):
+        return Path.home() / ".powershell_llmstack_hook.ps1"
+    return Path.home() / f".{shell}_llmstack_hook"
 
 
 def _source_line(shell: str, path: Path) -> str:
     """Shell-specific incantation to load the hook file."""
-    if shell in ("powershell", "pwsh"):
+    if _is_powershell(shell):
         return f". '{path}'"
     return f'source "{path}"'
+
+
+def eval_line(shell: str) -> str:
+    """The one-shot the user pastes / adds to their rc to install the hook.
+
+    POSIX shells use ``eval "$(...)"``; PowerShell has no ``eval`` and
+    needs ``Invoke-Expression`` over the captured stdout.
+    """
+    if _is_powershell(shell):
+        return f"llmstack activate {shell} | Out-String | Invoke-Expression"
+    return f'eval "$(llmstack activate {shell})"'
 
 
 def write_hook(shell: str) -> tuple[Path, str]:
@@ -62,10 +84,24 @@ def run(args: list[str]) -> int:
 
     path, src = write_hook(shell)
 
-    eval_line = f'eval "$(llmstack activate {shell})"'
+    line = eval_line(shell)
     print(f"[OK] hook written: {path}", file=sys.stderr)
     print( "     activate in this shell now (and for every new shell:", file=sys.stderr)
-    print(f"     paste into your rc):  {eval_line}", file=sys.stderr)
+    print(f"     paste into your rc):  {line}", file=sys.stderr)
+    if _is_powershell(shell):
+        # PowerShell's default `Restricted` policy on Windows blocks
+        # dot-sourcing any .ps1; surface the one-time fix so the
+        # `Invoke-Expression` line above doesn't fail with "running
+        # scripts is disabled on this system".
+        print(
+            "     PowerShell execution policy must allow local scripts; "
+            "if dot-sourcing fails, run once:",
+            file=sys.stderr,
+        )
+        print(
+            "         Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned",
+            file=sys.stderr,
+        )
 
     print(src)
     return 0

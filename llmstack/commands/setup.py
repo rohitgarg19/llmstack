@@ -18,7 +18,7 @@ import shutil
 import subprocess
 
 from llmstack._platform import IS_WINDOWS, shell_family
-from llmstack.commands.activate import write_hook
+from llmstack.commands.activate import eval_line, write_hook
 from llmstack.download.binary import install_llama_swap
 from llmstack.download.ggufs import download_all, wait_for_downloads
 from llmstack.paths import is_remote, remote_url
@@ -86,16 +86,25 @@ def run(args: list[str]) -> int:
         rc_hint = "your shell rc file"
         hook_arg = None
 
-    eval_line: str | None = None
+    activate_line: str | None = None
     if hook_arg is not None:
         path, _src = write_hook(hook_arg)
-        eval_line = f'eval "$(llmstack activate {hook_arg})"'
+        activate_line = eval_line(hook_arg)
         print(f"[OK] hook installed: {path}")
         print()
         print("To turn it on in this shell now (and persist across new shells, paste")
         print(f"the same line into {rc_hint}):")
         print()
-        print(f"    {eval_line}")
+        print(f"    {activate_line}")
+        if family == "powershell":
+            # PowerShell needs script execution allowed before
+            # dot-sourcing the .ps1; flag the one-time fix here so the
+            # Invoke-Expression line above doesn't silently fail.
+            print()
+            print("    PowerShell execution policy must allow local scripts;")
+            print("    if dot-sourcing fails with \"running scripts is disabled\", run once:")
+            print()
+            print("        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned")
 
     print()
     print("[5/5] checking opencode...")
@@ -134,8 +143,8 @@ def run(args: list[str]) -> int:
     print("[OK] setup complete.")
     print()
     print("Next steps:")
-    if eval_line is not None:
-        print(f"  1. Run (and paste into {rc_hint} for persistence): {eval_line}")
+    if activate_line is not None:
+        print(f"  1. Run (and paste into {rc_hint} for persistence): {activate_line}")
     else:
         print("  1. Source the generated hook in your shell rc (see above)")
     print("  2. llmstack install     # generate .llmstack/ configs for this project")

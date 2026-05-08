@@ -278,10 +278,15 @@ py -3 -m venv .venv
 #    `start` falls back to spawning a PowerShell subshell.
 .venv\Scripts\llmstack start
 
-# 4. Auto-activate per project from any new PowerShell window:
-Invoke-Expression (& llmstack activate powershell | Out-String)
-# or persist (writes ~/.powershell_llmstack_hook + sources it on every shell):
-"Invoke-Expression (& llmstack activate powershell | Out-String)" | Add-Content $PROFILE
+# 4. Auto-activate per project from any new PowerShell window. The hook
+#    file is a .ps1 (PowerShell won't dot-source it without that
+#    extension) and dot-sourcing it requires script execution to be
+#    allowed -- if you see "running scripts is disabled on this
+#    system", run once:
+#       Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+llmstack activate powershell | Out-String | Invoke-Expression
+# or persist (writes ~/.powershell_llmstack_hook.ps1 + sources it on every shell):
+"llmstack activate powershell | Out-String | Invoke-Expression" | Add-Content $PROFILE
 ```
 
 Notes:

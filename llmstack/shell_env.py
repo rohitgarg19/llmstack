@@ -261,14 +261,15 @@ _ZSH_HOOK = r"""# --- llmstack auto-activation hook (zsh) ----------------------
 #
 # Tool-availability gate: before activating, we verify the tools needed
 # for this channel are present:
-#   - `llmstack` (always required)
-#   - `llama-swap`     (only for local channels: current / next)
-#   - `llama-server` or `llama-cli` (likewise local-only)
-# external-mode projects skip the local-tool checks because llama-swap
-# and llama-server live on the remote. If any required tool is missing
-# we print "folder detected but tool not available" + install hints and
-# DON'T activate -- the env stays clean so opencode keeps using the
-# user's global config until they install the missing piece.
+#   - `llmstack`   (always required -- blocker)
+#   - `llama-swap` (only for local channels: current / next -- blocker)
+#   - `llama-server` / `llama-cli` (local-only, *warning* not blocker --
+#     a Bedrock-only models.ini activates fine without llama-server;
+#     local GGUF rows would fail to start, hence the heads-up)
+# external-mode projects skip all local-tool checks because llama-swap
+# and llama-server live on the remote. Blockers print "folder detected
+# but tool not available" + install hints and skip activation; warnings
+# print a one-shot hint and activate anyway.
 #
 # Marker file format (one line):
 #   <channel>[ <url>]
@@ -322,13 +323,18 @@ _llmstack_find_swap() {
 }
 
 _llmstack_check_tools() {
-    # Populates _llmstack_missing array. Returns 0 iff nothing is missing.
+    # Populates _llmstack_missing (blockers) and _llmstack_warnings
+    # (non-blockers). Returns 0 iff there are no blockers; warnings
+    # never block activation.
     _llmstack_missing=()
+    _llmstack_warnings=()
     command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
     if [[ "${1:-current}" != "external" ]]; then
         _llmstack_find_swap || _llmstack_missing+=("llama-swap")
+        # llama-server is a soft requirement: bedrock-only models.ini
+        # files don't need it, so missing == warn-and-continue.
         if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
-            _llmstack_missing+=("llama-server")
+            _llmstack_warnings+=("llama-server")
         fi
     fi
     (( ${#_llmstack_missing[@]} == 0 ))
@@ -343,7 +349,7 @@ _llmstack_install_hint() {
 }
 
 _llmstack_warn_missing() {
-    # $1 = project root; uses _llmstack_missing.
+    # $1 = project root; uses _llmstack_missing (blockers only).
     print -r -- ""
     print -P -- "%F{220}[llmstack]%f detected $1/.llmstack but missing local tool(s):"
     local t
@@ -351,6 +357,19 @@ _llmstack_warn_missing() {
         _llmstack_install_hint "$t"
     done
     print -r -- "    not activating. install the missing tool(s) and \`cd\` back in to retry."
+    print -r -- ""
+}
+
+_llmstack_warn_optional() {
+    # $1 = project root; uses _llmstack_warnings. One-shot per activation
+    # (the LLMSTACK_WORK_DIR idempotency guard suppresses repeats).
+    print -r -- ""
+    print -P -- "%F{220}[llmstack]%f $1: activating without optional local tool(s):"
+    local t
+    for t in "${_llmstack_warnings[@]}"; do
+        _llmstack_install_hint "$t"
+    done
+    print -r -- "    bedrock-only models.ini works fine; local GGUF rows will fail to start."
     print -r -- ""
 }
 
@@ -393,11 +412,16 @@ _llmstack_activate() {
     fi
     : "${_ch:=current}"
 
-    # Tool gate -- bail before exporting anything if requirements aren't met.
+    # Tool gate -- bail before exporting anything if a *blocker* is
+    # missing. Non-blocking warnings (e.g. llama-server for a
+    # bedrock-only setup) print a hint but proceed.
     if ! _llmstack_check_tools "$_ch"; then
         _llmstack_warn_missing "$found"
         export _LLMSTACK_WARNED_FOR="$found"
         return 0
+    fi
+    if (( ${#_llmstack_warnings[@]} > 0 )); then
+        _llmstack_warn_optional "$found"
     fi
 
     export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
@@ -441,14 +465,15 @@ _BASH_HOOK = r"""# --- llmstack auto-activation hook (bash) --------------------
 #
 # Tool-availability gate: before activating we verify the tools needed
 # for this channel are present:
-#   - `llmstack` (always required)
-#   - `llama-swap`     (only for local channels: current / next)
-#   - `llama-server` or `llama-cli` (likewise local-only)
-# If any required tool is missing we print a one-shot "folder detected
-# but tool not available" warning + install hints and DON'T activate
-# (env stays clean). The warning is suppressed on subsequent prompts in
-# the same project via the _LLMSTACK_WARNED_FOR guard so we don't spam
-# every PROMPT_COMMAND tick.
+#   - `llmstack`   (always required -- blocker)
+#   - `llama-swap` (only for local channels: current / next -- blocker)
+#   - `llama-server` / `llama-cli` (local-only, *warning* not blocker --
+#     a Bedrock-only models.ini activates fine without llama-server;
+#     local GGUF rows would fail to start, hence the heads-up)
+# Blockers print a one-shot "folder detected but tool not available"
+# warning + install hints and DON'T activate (env stays clean). Warnings
+# print a hint and activate anyway. The _LLMSTACK_WARNED_FOR guard
+# suppresses repeat warnings on subsequent PROMPT_COMMAND ticks.
 #
 # Marker file format (one line):
 #   <channel>[ <url>]
@@ -501,12 +526,17 @@ _llmstack_find_swap() {
 }
 
 _llmstack_check_tools() {
+    # Populates _llmstack_missing (blockers) and _llmstack_warnings
+    # (non-blockers). Returns 0 iff there are no blockers.
     _llmstack_missing=()
+    _llmstack_warnings=()
     command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
     if [[ "${1:-current}" != "external" ]]; then
         _llmstack_find_swap || _llmstack_missing+=("llama-swap")
+        # llama-server is a soft requirement: bedrock-only models.ini
+        # files don't need it, so missing == warn-and-continue.
         if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
-            _llmstack_missing+=("llama-server")
+            _llmstack_warnings+=("llama-server")
         fi
     fi
     [[ ${#_llmstack_missing[@]} -eq 0 ]]
@@ -528,6 +558,18 @@ _llmstack_warn_missing() {
         _llmstack_install_hint "$t"
     done
     printf '    not activating. install the missing tool(s) and `cd` back in to retry.\n\n'
+}
+
+_llmstack_warn_optional() {
+    # $1 = project root; uses _llmstack_warnings. One-shot per
+    # activation thanks to LLMSTACK_WORK_DIR idempotency.
+    printf '\n'
+    printf '\033[38;5;220m[llmstack]\033[0m %s: activating without optional local tool(s):\n' "$1"
+    local t
+    for t in "${_llmstack_warnings[@]}"; do
+        _llmstack_install_hint "$t"
+    done
+    printf '    bedrock-only models.ini works fine; local GGUF rows will fail to start.\n\n'
 }
 
 _llmstack_deactivate() {
@@ -565,10 +607,15 @@ _llmstack_activate() {
     fi
     : "${_ch:=current}"
 
+    # Blockers only -- non-blocking warnings (e.g. llama-server for a
+    # bedrock-only setup) print a hint but don't skip activation.
     if ! _llmstack_check_tools "$_ch"; then
         _llmstack_warn_missing "$found"
         export _LLMSTACK_WARNED_FOR="$found"
         return 0
+    fi
+    if [[ ${#_llmstack_warnings[@]} -gt 0 ]]; then
+        _llmstack_warn_optional "$found"
     fi
 
     export OPENCODE_CONFIG="$found/.llmstack/opencode.json"
@@ -618,12 +665,25 @@ _POWERSHELL_HOOK = r"""# --- llmstack auto-activation hook (PowerShell) --------
 #
 # Tool-availability gate: before activating we verify the tools needed
 # for this channel are present:
-#   - llmstack (always required)
-#   - llama-swap (only for local channels: current / next)
-#   - llama-server or llama-cli (likewise local-only)
-# If any required tool is missing we print a one-shot warning + install
-# hints and DON'T activate. The _LLMSTACK_WARNED_FOR guard suppresses
-# the warning on subsequent prompts in the same project.
+#   - llmstack   (always required -- blocker)
+#   - llama-swap (only for local channels: current / next -- blocker)
+#   - llama-server / llama-cli (local-only, *warning* not blocker --
+#     a Bedrock-only models.ini activates fine without llama-server;
+#     local GGUF rows would fail to start, hence the heads-up)
+# Blockers print a one-shot warning + install hints and DON'T activate.
+# Warnings print a hint and activate anyway. The _LLMSTACK_WARNED_FOR
+# guard suppresses repeats on subsequent prompts in the same project.
+#
+# Note: this hook file MUST be saved with a `.ps1` extension or
+# PowerShell won't dot-source it (it'll try to open the file via the
+# Windows shell file-association instead). `llmstack activate
+# powershell` writes ~/.powershell_llmstack_hook.ps1 for that reason.
+#
+# Note: PowerShell's default execution policy on Windows (`Restricted`)
+# blocks loading any .ps1 from disk. If you see "running scripts is
+# disabled on this system", allow signed local scripts once with:
+#     Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+# (or `-ExecutionPolicy Bypass` for an even looser policy).
 #
 # Add to your $PROFILE (one time):
 #     llmstack activate powershell | Out-String | Invoke-Expression
@@ -691,16 +751,20 @@ function global:_LlmstackFindSwap {
 
 function global:_LlmstackCheckTools {
     param([string]$Channel)
-    $missing = @()
+    # Returns @{ missing = <blockers>; warnings = <non-blockers> }.
+    $missing  = @()
+    $warnings = @()
     if (-not (Get-Command llmstack -ErrorAction SilentlyContinue)) { $missing += "llmstack" }
     if ($Channel -ne "external") {
         if (-not (_LlmstackFindSwap)) { $missing += "llama-swap" }
+        # llama-server is a soft requirement: bedrock-only models.ini
+        # files don't need it, so missing == warn-and-continue.
         if (-not (Get-Command llama-server -ErrorAction SilentlyContinue) -and `
             -not (Get-Command llama-cli    -ErrorAction SilentlyContinue)) {
-            $missing += "llama-server"
+            $warnings += "llama-server"
         }
     }
-    return ,$missing
+    return @{ missing = ,$missing; warnings = ,$warnings }
 }
 
 function global:_LlmstackInstallHint {
@@ -720,6 +784,20 @@ function global:_LlmstackWarnMissing {
     Write-Host "detected $Found\.llmstack but missing local tool(s):"
     foreach ($t in $Missing) { Write-Host (_LlmstackInstallHint $t) }
     Write-Host "    not activating. install the missing tool(s) and cd back in to retry."
+    Write-Host ""
+}
+
+function global:_LlmstackWarnOptional {
+    # Non-blocking: tool isn't on PATH but a bedrock-only models.ini
+    # would still work. One-shot per activation thanks to the
+    # LLMSTACK_WORK_DIR idempotency guard.
+    param([string]$Found, [string[]]$Warnings)
+    Write-Host ""
+    $esc = [char]27
+    Write-Host -NoNewline "${esc}[38;5;220m[llmstack]${esc}[0m "
+    Write-Host "${Found}: activating without optional local tool(s):"
+    foreach ($t in $Warnings) { Write-Host (_LlmstackInstallHint $t) }
+    Write-Host "    bedrock-only models.ini works fine; local GGUF rows will fail to start."
     Write-Host ""
 }
 
@@ -751,11 +829,14 @@ function global:_LlmstackActivate {
     $marker  = if (Test-Path -LiteralPath $live) { _LlmstackReadMarker $live } else { _LlmstackReadMarker $intent }
     $channel = if ($marker.channel) { $marker.channel } else { "current" }
 
-    $missing = _LlmstackCheckTools $channel
-    if ($missing.Count -gt 0) {
-        _LlmstackWarnMissing $found $missing
+    $tools = _LlmstackCheckTools $channel
+    if ($tools.missing.Count -gt 0) {
+        _LlmstackWarnMissing $found $tools.missing
         $env:_LLMSTACK_WARNED_FOR = $found
         return
+    }
+    if ($tools.warnings.Count -gt 0) {
+        _LlmstackWarnOptional $found $tools.warnings
     }
 
     $env:OPENCODE_CONFIG   = Join-Path $found ".llmstack/opencode.json"
