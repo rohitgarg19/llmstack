@@ -54,6 +54,7 @@ from llmstack.commands._helpers import (
 from llmstack.generators import render_to
 from llmstack.generators.llama_swap import render as render_yaml
 from llmstack.generators.llama_swap import validate as validate_yaml
+from llmstack.tiers import load_tiers
 from llmstack.paths import (
     DEFAULT_REMOTE_URL,
     ROUTER_PORT,
@@ -194,47 +195,55 @@ def run(args: list[str]) -> int:
     if not paths.opencode_json.is_file():
         raise SystemExit(f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install")
 
-    if is_running(paths.swap_pid):
-        launch_daemons = False
-        live_mark = read_marker(paths.active_marker)
-        live = live_mark.channel if live_mark else channel
-        if live != channel:
+    tiers = load_tiers()
+    has_gguf = any(t.is_gguf for t in tiers.values())
+
+    if has_gguf:
+        if is_running(paths.swap_pid):
+            launch_daemons = False
+            live_mark = read_marker(paths.active_marker)
+            live = live_mark.channel if live_mark else channel
+            if live != channel:
+                print(
+                    f"[!] llama-swap is already running in '{live}' channel; "
+                    f"refusing to also start '{channel}'. Stop the stack first:",
+                    file=sys.stderr,
+                )
+                print("\n      llmstack stop", file=sys.stderr)
+                print(f"      llmstack start --{channel}\n", file=sys.stderr)
+                return 1
+        elif port_responds(f"http://127.0.0.1:{SWAP_PORT}/health"):
+            # Something is already listening on :10102, but it isn't ours
+            # (no pid file in this project's state dir). The pre-flag flow
+            # silently joined as "shared", which was a footgun: a `stop`
+            # from this project would tear down the other project's
+            # daemons and we couldn't bring them back without local
+            # tooling. Instead, refuse and tell the user how to wire this
+            # project as a proper thin client.
             print(
-                f"[!] llama-swap is already running in '{live}' channel; "
-                f"refusing to also start '{channel}'. Stop the stack first:",
+                f"[!] port :{SWAP_PORT} is already in use (daemons started by "
+                "another project on this host).",
                 file=sys.stderr,
             )
-            print("\n      llmstack stop", file=sys.stderr)
-            print(f"      llmstack start --{channel}\n", file=sys.stderr)
+            print("    This project is installed for local mode -- it expects to own", file=sys.stderr)
+            print("    those daemons. To run as a thin client of the running stack:", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("        llmstack install --external", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("    (--external defaults to http://127.0.0.1:10101, the local router.)", file=sys.stderr)
+            print("    To take over instead, stop the running daemons first:", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("        llmstack stop && llmstack start", file=sys.stderr)
             return 1
-    elif port_responds(f"http://127.0.0.1:{SWAP_PORT}/health"):
-        # Something is already listening on :10102, but it isn't ours
-        # (no pid file in this project's state dir). The pre-flag flow
-        # silently joined as "shared", which was a footgun: a `stop`
-        # from this project would tear down the other project's
-        # daemons and we couldn't bring them back without local
-        # tooling. Instead, refuse and tell the user how to wire this
-        # project as a proper thin client.
-        print(
-            f"[!] port :{SWAP_PORT} is already in use (daemons started by "
-            "another project on this host).",
-            file=sys.stderr,
-        )
-        print("    This project is installed for local mode -- it expects to own", file=sys.stderr)
-        print("    those daemons. To run as a thin client of the running stack:", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("        llmstack install --external", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("    (--external defaults to http://127.0.0.1:10101, the local router.)", file=sys.stderr)
-        print("    To take over instead, stop the running daemons first:", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("        llmstack stop && llmstack start", file=sys.stderr)
-        return 1
+        else:
+            launch_daemons = True
     else:
         launch_daemons = True
 
     if launch_daemons:
-        if channel == "next":
+        if not has_gguf:
+            print("[*] bedrock-only config -- skipping llama-swap")
+        elif channel == "next":
             queued = _queued_next_tiers()
             if not queued:
                 print(
@@ -251,37 +260,40 @@ def run(args: list[str]) -> int:
             print(f"    queued upgrade tiers: {' '.join(queued)}")
         else:
             print(f"[*] generating yaml -> {paths.llama_swap_yaml}")
-        render_to(
-            paths.llama_swap_yaml,
-            render=lambda p: Path(p).write_text(render_yaml(use_next=(channel == "next"))),
-            validate=validate_yaml,
-        )
+        if has_gguf:
+            render_to(
+                paths.llama_swap_yaml,
+                render=lambda p: Path(p).write_text(render_yaml(use_next=(channel == "next"))),
+                validate=validate_yaml,
+            )
 
     print(f"[*] channel: {channel}  ({paths.llama_swap_yaml.name})")
 
     if launch_daemons:
-        print(f"[*] starting llama-swap on :{SWAP_PORT}")
-        spawn_daemon(
-            [
-                str(paths.llama_swap_bin),
-                "--config", str(paths.llama_swap_yaml),
-                "--listen", f"127.0.0.1:{SWAP_PORT}",
-            ],
-            log=paths.log_dir / "llama-swap.log",
-            pid_file=paths.swap_pid,
-        )
-        write_marker(paths.active_marker, ChannelMark(channel))
-        time.sleep(1)
-        if not is_running(paths.swap_pid):
-            print(f"[!] llama-swap failed to start. Check {paths.log_dir}/llama-swap.log")
-            paths.swap_pid.unlink(missing_ok=True)
-            paths.active_marker.unlink(missing_ok=True)
-            return 1
-        print(f"    pid {read_pid(paths.swap_pid)}")
+        if has_gguf:
+            print(f"[*] starting llama-swap on :{SWAP_PORT}")
+            spawn_daemon(
+                [
+                    str(paths.llama_swap_bin),
+                    "--config", str(paths.llama_swap_yaml),
+                    "--listen", f"127.0.0.1:{SWAP_PORT}",
+                ],
+                log=paths.log_dir / "llama-swap.log",
+                pid_file=paths.swap_pid,
+            )
+            write_marker(paths.active_marker, ChannelMark(channel))
+            time.sleep(1)
+            if not is_running(paths.swap_pid):
+                print(f"[!] llama-swap failed to start. Check {paths.log_dir}/llama-swap.log")
+                paths.swap_pid.unlink(missing_ok=True)
+                paths.active_marker.unlink(missing_ok=True)
+                return 1
+            print(f"    pid {read_pid(paths.swap_pid)}")
 
         print(f"[*] starting router on :{ROUTER_PORT}")
         env = os.environ.copy()
-        env.setdefault("LLAMA_SWAP_URL", f"http://127.0.0.1:{SWAP_PORT}")
+        if has_gguf:
+            env.setdefault("LLAMA_SWAP_URL", f"http://127.0.0.1:{SWAP_PORT}")
         env.setdefault("ROUTER_HOST", "127.0.0.1")
         env.setdefault("ROUTER_PORT", str(ROUTER_PORT))
         # Lock-step with the gguf --use-next swap: bedrock tiers in the
@@ -302,24 +314,29 @@ def run(args: list[str]) -> int:
             paths.router_pid.unlink(missing_ok=True)
             return 1
         print(f"    pid {read_pid(paths.router_pid)}")
-    else:
-        print(f"[=] llama-swap already running (pid {read_pid(paths.swap_pid)}, channel {channel})")
-        if is_running(paths.router_pid):
-            print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
+      else:
+            if has_gguf:
+                print(f"[=] llama-swap already running (pid {read_pid(paths.swap_pid)}, channel {channel})")
+            else:
+                print("[=] bedrock-only config -- llama-swap not used")
+            if is_running(paths.router_pid):
+                print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
 
     other = "next" if channel == "current" else "current"
     print()
     print(f"[OK] stack is up (channel: {channel}).")
     print()
     print(f'  router       http://127.0.0.1:{ROUTER_PORT}     (OpenAI-compatible, "auto" routing)')
-    print(f"  llama-swap   http://127.0.0.1:{SWAP_PORT}     (raw model endpoints + UI)")
+    if has_gguf:
+        print(f"  llama-swap   http://127.0.0.1:{SWAP_PORT}     (raw model endpoints + UI)")
     print()
     print("Try:")
     print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/v1/models | jq '.data[].id'")
     print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/models.ini | head")
     print()
     print("Logs:")
-    print(f"  tail -f {paths.log_dir}/llama-swap.log")
+    if has_gguf:
+        print(f"  tail -f {paths.log_dir}/llama-swap.log")
     print(f"  tail -f {paths.log_dir}/router.log")
     print()
     print("Switch channel (requires stop first):")
