@@ -314,13 +314,13 @@ def run(args: list[str]) -> int:
             paths.router_pid.unlink(missing_ok=True)
             return 1
         print(f"    pid {read_pid(paths.router_pid)}")
-      else:
-            if has_gguf:
-                print(f"[=] llama-swap already running (pid {read_pid(paths.swap_pid)}, channel {channel})")
-            else:
-                print("[=] bedrock-only config -- llama-swap not used")
-            if is_running(paths.router_pid):
-                print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
+    else:
+        if has_gguf:
+            print(f"[=] llama-swap already running (pid {read_pid(paths.swap_pid)}, channel {channel})")
+        else:
+            print("[=] bedrock-only config -- llama-swap not used")
+        if is_running(paths.router_pid):
+            print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
 
     other = "next" if channel == "current" else "current"
     print()
