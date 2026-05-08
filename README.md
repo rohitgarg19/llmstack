@@ -507,8 +507,8 @@ All knobs are env vars; defaults are picked up by `llmstack start`.
 | `ROUTER_ULTRA_MODEL` | `code-ultra` | short-context top tier → here (gated on availability) |
 | `ROUTER_PLAN_MODEL` | `plan` | design/discussion verbs → here |
 | `ROUTER_UNCENSORED_MODEL` | `plan-uncensored` | `[nofilter]` triggers → here |
-| `ROUTER_HIGH_FIDELITY_CEILING` | `8000` | tokens; at or below this, route to top tier (ultra → smart fallback) |
-| `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast` |
+| `ROUTER_HIGH_FIDELITY_CEILING` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
+| `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
 | `ROUTER_MULTI_TURN` | `6` | turn count that floors the long-context rung at `code-smart` |
 | `ROUTER_HOST` / `ROUTER_PORT` | `127.0.0.1` / `10101` | listen address |
 | `LOG_LEVEL` | `info` | router log level |

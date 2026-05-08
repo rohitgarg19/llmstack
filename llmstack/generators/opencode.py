@@ -172,9 +172,22 @@ def build_config(
 
     tier_sections = [s for s in cfg.sections() if s != "ROUTING"]
 
-    # `auto` context = MIN across all tiers so opencode never packs a prompt
-    # that overflows the tier the router actually picks.
-    auto_ctx = min(
+    # `auto` context = the fast tier's ctx_size. The router runs a
+    # step-DOWN ladder (ultra -> smart -> fast as context grows), so
+    # the largest window in the ladder is fast's, and that's the
+    # effective ceiling for `model = auto` -- anything bigger has no
+    # tier to land on. Using `min(...)` here would clip opencode to
+    # the smallest tier's window even though the router would never
+    # actually send a long prompt to that tier.
+    fast_ctx = next(
+        (
+            _int(cfg[s].get("ctx_size", ""), 0)
+            for s in tier_sections
+            if (cfg[s].get("role") or "").strip() == "fast"
+        ),
+        0,
+    )
+    auto_ctx = fast_ctx or max(
         (_int(cfg[s].get("ctx_size", ""), 0) for s in tier_sections),
         default=8192,
     ) or 8192

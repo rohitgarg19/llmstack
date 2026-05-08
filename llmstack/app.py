@@ -74,7 +74,18 @@ Routing decision tree (first match wins):
   2. Explicit "ultra" trigger (``[ultra]``, ``[opus]``,
      ``ultra:``, ``opus:``) AND ultra tier configured -> code-ultra
   3. PLAN signal words AND no code-block / agent verbs / tools
-     (design discussion, no implementation pending)   -> plan
+     AND estimated tokens <= ``[plan]`` tier's ctx_size
+     (pure design discussion that fits the planner's
+     window)                                          -> plan
+                                                         (if the planner's
+                                                          ctx_size is breached
+                                                          we fall through to
+                                                          the coding ladder
+                                                          rather than send a
+                                                          request that won't
+                                                          fit -- the coding
+                                                          tiers cover larger
+                                                          windows by design)
   4. Estimated input tokens <= HIGH_FIDELITY_CEILING
      ("reasonable context still being built")         -> code-ultra
                                                          (else code-smart)
@@ -89,6 +100,12 @@ Routing decision tree (first match wins):
                                                           MULTI_TURN_THRESHOLD,
                                                           since 3B models
                                                           tool-call unreliably)
+
+The auto router's effective max context window is
+``[code-fast].ctx_size`` -- fast is the bottom of the step-down
+ladder, so any context that would overflow the tiers above lands on
+fast. Inputs longer than fast's window have no safe home and should
+be considered out of scope for ``model = auto``.
 
 Ultra-tier routing is gated on availability: rule (2) and the
 "high-fidelity" rung of (4) first check that the tier is loaded
@@ -137,14 +154,21 @@ UNCENSORED_MODEL = os.getenv("ROUTER_UNCENSORED_MODEL", "plan-uncensored")
 #   est <= MID_FIDELITY_CEILING   -> code-smart
 #   est >  MID_FIDELITY_CEILING   -> code-fast (or smart with tools/loop)
 #
+# Each ceiling is half of the corresponding tier's ``ctx_size`` in
+# models.ini -- the ceiling marks where the tier still has comfortable
+# headroom, and double the ceiling is where the router has already
+# stepped down to the next tier (so the upper tier never has to handle
+# inputs at its own limit).
+#
 # Defaults:
-#   HIGH 8000  - "reasonable context built": a couple of files loaded,
+#   HIGH 12000 - "reasonable context built": a couple of files loaded,
 #                instructions clear, top-tier still cheap+fast here.
-#   MID  32000 - half of code-smart's 65k window; past this, hosted
+#                Pairs with a 24k ctx_size on code-ultra.
+#   MID  32000 - half of code-smart's 64k window; past this, hosted
 #                top-tier latency/$cost balloons and code-smart starts
 #                getting cramped, while code-fast's 128k YaRN window
 #                still has comfortable headroom.
-HIGH_FIDELITY_CEILING = int(os.getenv("ROUTER_HIGH_FIDELITY_CEILING", "8000"))
+HIGH_FIDELITY_CEILING = int(os.getenv("ROUTER_HIGH_FIDELITY_CEILING", "12000"))
 MID_FIDELITY_CEILING = int(os.getenv("ROUTER_MID_FIDELITY_CEILING", "32000"))
 # Floor the long-context rung at code-smart whenever a tool-call
 # protocol is in play -- 3B models tool-call unreliably regardless of
@@ -339,18 +363,30 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
         or _matches(AGENT_SIGNALS, messages, prompt)
     )
 
+    est = _estimate_tokens(messages, prompt)
+
     # Plan track is orthogonal to the code fidelity ladder: ``plan`` is a
     # chat-tuned model meant for design / "should we" discussions. Only
     # take it when nothing about the request says "I'm about to write
-    # code" (no triple-backticks, no agent verbs, no tool calls).
+    # code" (no triple-backticks, no agent verbs, no tool calls). And
+    # only if the input fits in the planner's ctx_size -- past that we'd
+    # be sending a request the planner can't hold, so we fall through
+    # to the coding ladder, which has tiers (smart, fast) explicitly
+    # sized for larger contexts.
     if (
         not has_tools
         and not has_code_signal
         and _matches(PLAN_SIGNALS, messages, prompt)
     ):
-        return PLAN_MODEL, "plan-signal"
-
-    est = _estimate_tokens(messages, prompt)
+        plan_tier = TIER_BY_ALIAS.get(PLAN_MODEL)
+        plan_ctx = plan_tier.ctx_size if plan_tier else 0
+        if not plan_ctx or est <= plan_ctx:
+            return PLAN_MODEL, "plan-signal"
+        log.info(
+            "plan-signal but tokens~%d > %s.ctx_size %d; "
+            "falling through to coding ladder",
+            est, PLAN_MODEL, plan_ctx,
+        )
 
     # Rung 1: short context -- start at the top.
     if est <= HIGH_FIDELITY_CEILING:
