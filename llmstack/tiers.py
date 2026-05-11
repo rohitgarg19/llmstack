@@ -139,6 +139,7 @@ class BedrockConfig:
     endpoint_url: str | None = None
     model_id_next: str | None = None
     region_next: str | None = None
+    max_output_tokens: int | None = None
 
     @property
     def has_next(self) -> bool:
@@ -298,6 +299,7 @@ def _build_bedrock(section) -> BedrockConfig:
         endpoint_url=_opt(section.get("aws_endpoint_url")),
         model_id_next=_opt(section.get("aws_model_id_next")),
         region_next=_opt(section.get("aws_region_next")),
+        max_output_tokens=_int(section.get("aws_max_output_tokens", "")) or None,
     )
 
 

@@ -400,7 +400,7 @@ def _tool_config(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     return {"tools": specs}
 
 
-def _inference_config(body: dict[str, Any]) -> dict[str, Any]:
+def _inference_config(body: dict[str, Any], max_output_tokens: int | None = None) -> dict[str, Any]:
     # We forward only what the Converse `inferenceConfig` schema accepts:
     # `temperature`, `topP`, `maxTokens`, `stopSequences`. Other sampler
     # knobs (`top_k`, `min_p`, `repetition_penalty`) have no Converse-
@@ -415,28 +415,34 @@ def _inference_config(body: dict[str, Any]) -> dict[str, Any]:
     # forward. Configure Bedrock tiers in models.ini accordingly: omit
     # the `sampler =` line for Opus 4.7+, and pick the one allowed knob
     # for Sonnet 4.5 / Haiku 4.5.
-    cfg: dict[str, Any] = {}
+    #
+    # `max_output_tokens` is the per-tier cap from models.ini
+    # (`aws_max_output_tokens`). When set, the client-requested value is
+    # silently clamped to this ceiling -- useful for models like
+    # Llama 3.1 405B whose Bedrock deployment rejects values above 4096.
+    icfg: dict[str, Any] = {}
     if "temperature" in body:
         try:
-            cfg["temperature"] = float(body["temperature"])
+            icfg["temperature"] = float(body["temperature"])
         except (TypeError, ValueError):
             pass
     if "top_p" in body:
         try:
-            cfg["topP"] = float(body["top_p"])
+            icfg["topP"] = float(body["top_p"])
         except (TypeError, ValueError):
             pass
     if "max_tokens" in body or "max_completion_tokens" in body:
         try:
-            cfg["maxTokens"] = int(body.get("max_tokens") or body.get("max_completion_tokens"))
+            requested = int(body.get("max_tokens") or body.get("max_completion_tokens"))
+            icfg["maxTokens"] = min(requested, max_output_tokens) if max_output_tokens else requested
         except (TypeError, ValueError):
             pass
     stop = body.get("stop")
     if isinstance(stop, str):
-        cfg["stopSequences"] = [stop]
+        icfg["stopSequences"] = [stop]
     elif isinstance(stop, list):
-        cfg["stopSequences"] = [s for s in stop if isinstance(s, str)]
-    return cfg
+        icfg["stopSequences"] = [s for s in stop if isinstance(s, str)]
+    return icfg
 
 
 def _build_converse_kwargs(tier: Tier, body: dict[str, Any], cfg: BedrockConfig) -> dict[str, Any]:
@@ -463,7 +469,7 @@ def _build_converse_kwargs(tier: Tier, body: dict[str, Any], cfg: BedrockConfig)
     if sys_blocks:
         converse_kwargs["system"] = sys_blocks
 
-    inference = _inference_config(body)
+    inference = _inference_config(body, max_output_tokens=cfg.max_output_tokens)
     if inference:
         converse_kwargs["inferenceConfig"] = inference
 
