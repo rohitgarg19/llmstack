@@ -170,7 +170,7 @@ MID_FIDELITY_CEILING = int(os.getenv("ROUTER_MID_FIDELITY_CEILING", "32000"))
 # Floor the long-context rung at code-smart whenever a tool-call
 # protocol is in play -- 3B models tool-call unreliably regardless of
 # how big their context window is.
-MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "6"))
+MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "10"))
 AUTO_ALIASES = {"auto", "", None}
 
 UNCENSORED_TRIGGERS = re.compile(
@@ -353,7 +353,7 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
                     ULTRA_MODEL, AGENT_MODEL)
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
-    n_turns = len(messages) if messages else 0
+    n_turns = sum(1 for m in (messages or []) if m.get("role") == "user")
     has_code_signal = (
         _matches(CODE_BLOCK, messages, prompt)
         or _matches(AGENT_SIGNALS, messages, prompt)
@@ -402,7 +402,7 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     # prevent the step-down (plan tiers strip tools before dispatch,
     # and code-fast is a hosted model that tool-calls reliably).
     if n_turns >= MULTI_TURN_THRESHOLD:
-        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} (turns={n_turns} floor)"
+        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} (user-turns={n_turns}>={MULTI_TURN_THRESHOLD} floor)"
     return FAST_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING}"
 
 
