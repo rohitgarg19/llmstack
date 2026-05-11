@@ -11,7 +11,6 @@ from llmstack.app import (
     MID_FIDELITY_CEILING,
     MULTI_TURN_THRESHOLD,
     ULTRA_MODEL,
-    ULTRA_TRIGGERS,
     _estimate_tokens,
     _last_user_text,
     _ultra_available,
