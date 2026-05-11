@@ -588,6 +588,8 @@ async def _complete_response(client: Any, tier: Tier, converse_kwargs: dict[str,
         return JSONResponse(status_code=502, content={"error": _error_payload(exc)})
 
     message, finish = _openai_message_from_converse(resp)
+    if message.get("content"):
+        message["name"] = tier.name
     usage_in = (resp.get("usage") or {})
     payload = {
         "id":      _completion_id(),
@@ -665,7 +667,7 @@ async def _stream_response(client: Any, tier: Tier, converse_kwargs: dict[str, A
 
         # First chunk: announce the assistant role so OpenAI clients can
         # initialise their accumulator.
-        yield _sse(_frame({"role": "assistant"}))
+        yield _sse(_frame({"role": "assistant", "name": model_label}))
 
         # Per-content-block state: index -> "text" | "tool_use"
         block_kinds: dict[int, str] = {}

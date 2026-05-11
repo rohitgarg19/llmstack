@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-import re
 from unittest.mock import patch
 
 from llmstack.app import (
     AGENT_MODEL,
-    AGENT_SIGNALS,
-    CODE_BLOCK,
     FAST_MODEL,
     HIGH_FIDELITY_CEILING,
     MID_FIDELITY_CEILING,
     MULTI_TURN_THRESHOLD,
-    PLAN_MODEL,
-    PLAN_SIGNALS,
     ULTRA_MODEL,
     ULTRA_TRIGGERS,
-    UNCENSORED_MODEL,
-    UNCENSORED_TRIGGERS,
     _estimate_tokens,
     _last_user_text,
-    _matches,
     _ultra_available,
     classify,
 )
@@ -93,58 +85,6 @@ class TestLastUserText:
         assert _last_user_text(messages) == "first\n second"
 
 
-class TestMatches:
-    """Tests for _matches()."""
-
-    def test_empty_pattern(self):
-        assert _matches(re.compile(r""), None, None) is False
-
-    def test_pattern_matches_prompt(self):
-        pattern = re.compile(r"hello")
-        assert _matches(pattern, None, "hello world") is True
-
-    def test_pattern_matches_message_text(self):
-        pattern = re.compile(r"hello")
-        messages = [{"role": "user", "content": "say hello"}]
-        assert _matches(pattern, messages, None) is True
-
-    def test_no_match(self):
-        pattern = re.compile(r"xyz")
-        messages = [{"role": "user", "content": "hello world"}]
-        assert _matches(pattern, messages, None) is False
-
-
-class TestTriggerPatterns:
-    """Tests for trigger regex patterns."""
-
-    def test_uncensored_triggers(self):
-        assert UNCENSORED_TRIGGERS.search("[uncensored]") is not None
-        assert UNCENSORED_TRIGGERS.search("[nofilter]") is not None
-        assert UNCENSORED_TRIGGERS.search("uncensored: ") is not None
-        assert UNCENSORED_TRIGGERS.search("nofilter:") is not None
-
-    def test_ultra_triggers(self):
-        assert ULTRA_TRIGGERS.search("[ultra]") is not None
-        assert ULTRA_TRIGGERS.search("[opus]") is not None
-        assert ULTRA_TRIGGERS.search("ultra: ") is not None
-        assert ULTRA_TRIGGERS.search("opus: ") is not None
-
-    def test_plan_signals(self):
-        assert PLAN_SIGNALS.search("design") is not None
-        assert PLAN_SIGNALS.search("architect") is not None
-        assert PLAN_SIGNALS.search("should we") is not None
-        assert PLAN_SIGNALS.search("explain why") is not None
-
-    def test_agent_signals(self):
-        assert AGENT_SIGNALS.search("implement") is not None
-        assert AGENT_SIGNALS.search("write a function") is not None
-        assert AGENT_SIGNALS.search("fix the bug") is not None
-
-    def test_code_block(self):
-        assert CODE_BLOCK.search("```python") is not None
-        assert CODE_BLOCK.search("`" + "a" * 31 + "`") is not None
-
-
 class TestUltraAvailable:
     """Tests for _ultra_available()."""
 
@@ -169,12 +109,6 @@ class TestClassify:
 
     def _with_ultra(self, available: bool):
         return patch("llmstack.app.TIER_BY_ALIAS", {ULTRA_MODEL: object()} if available else {})
-
-    def test_uncensored_trigger_routes_to_uncensored(self):
-        body = {"messages": _msgs("[nofilter] explain something")}
-        model, reason = classify(body)
-        assert model == UNCENSORED_MODEL
-        assert "uncensored" in reason
 
     def test_ultra_trigger_routes_to_ultra_when_available(self):
         body = {"messages": _msgs("[ultra] write me a function")}
@@ -241,32 +175,13 @@ class TestClassify:
             model, reason = classify(body)
         assert model == FAST_MODEL
 
-    def test_plan_signal_routes_to_plan(self):
+    def test_plan_signal_does_not_route_to_plan(self):
         body = {"messages": _msgs("how would you design a rate limiter?")}
         with self._with_ultra(False):
             model, reason = classify(body)
-        assert model == PLAN_MODEL
-        assert "plan-signal" in reason
+        assert model != "plan"
 
-    def test_plan_signal_with_code_block_routes_to_coding_ladder(self):
-        body = {"messages": _msgs("how would you design this?\n```python\npass\n```")}
-        with self._with_ultra(False):
-            model, reason = classify(body)
-        assert model != PLAN_MODEL
-
-    def test_plan_signal_with_agent_verb_routes_to_coding_ladder(self):
-        body = {"messages": _msgs("implement a rate limiter")}
-        with self._with_ultra(False):
-            model, reason = classify(body)
-        assert model != PLAN_MODEL
-
-    def test_plan_signal_after_prior_coding_exchange_routes_to_plan(self):
-        messages = [
-            {"role": "user", "content": "refactor this function for clarity:\n```python\ndef f(x): return x*2\n```"},
-            {"role": "assistant", "content": "Sure, here is the refactored version."},
-            {"role": "user", "content": "explain why these changes are important?"},
-        ]
-        body = {"messages": messages}
-        with self._with_ultra(False):
-            model, reason = classify(body)
-        assert model == PLAN_MODEL, f"expected plan, got {model} ({reason})"
+    def test_uncensored_trigger_does_not_route_to_uncensored(self):
+        body = {"messages": _msgs("[nofilter] explain something")}
+        model, reason = classify(body)
+        assert model != "plan-uncensored"

@@ -36,7 +36,7 @@ Behaviour:
   ``POST /v1/completions``
     - if request body ``model == "auto"`` (or unset), classify the request
       and rewrite ``model`` -> one of: ``code-fast``, ``code-smart``,
-      ``code-ultra`` (when wired), ``plan``, ``plan-uncensored``.
+      ``code-ultra`` (when wired).
     - otherwise pass through unchanged.
     - tiers with ``backend = bedrock`` in ``models.ini`` are dispatched
       to AWS Bedrock via :mod:`llmstack.backends.bedrock` instead of
@@ -63,40 +63,27 @@ step DOWN as context grows**. This inverts the classic
     from priors.
 
 So as the conversation accumulates context, we step *down*: ultra
--> smart -> fast. Triggers and the plan track sit alongside this
-ladder.
+-> smart -> fast.
 
 Routing decision tree (first match wins):
 
-  1. Explicit "uncensored" trigger in the last user message
-     (``[nofilter]``, ``[uncensored]``, ``[heretic]``, or a line
-     starting with ``uncensored:`` / ``nofilter:``) -> plan-uncensored
-  2. Explicit "ultra" trigger (``[ultra]``, ``[opus]``,
+  1. Explicit "ultra" trigger (``[ultra]``, ``[opus]``,
      ``ultra:``, ``opus:``) AND ultra tier configured -> code-ultra
-  3. PLAN signal words AND no code-block / agent verbs / tools
-     AND estimated tokens <= ``[plan]`` tier's ctx_size
-     (pure design discussion that fits the planner's
-     window)                                          -> plan
-                                                         (if the planner's
-                                                          ctx_size is breached
-                                                          we fall through to
-                                                          the coding ladder
-                                                          rather than send a
-                                                          request that won't
-                                                          fit -- the coding
-                                                          tiers cover larger
-                                                          windows by design)
-  4. Estimated input tokens <= HIGH_FIDELITY_CEILING
+  2. Estimated input tokens <= HIGH_FIDELITY_CEILING
      ("reasonable context still being built")         -> code-ultra
                                                          (else code-smart)
-  5. Estimated input tokens <= MID_FIDELITY_CEILING   -> code-smart
-   6. Otherwise (long context, top-tier becomes
-      expensive/slow, fast tier's 128k window is the
-      best fit and it's free)                          -> code-fast
+  3. Estimated input tokens <= MID_FIDELITY_CEILING   -> code-smart
+  4. Otherwise (long context, top-tier becomes
+     expensive/slow, fast tier's 128k window is the
+     best fit and it's free)                          -> code-fast
                                                          (floored at
                                                           code-smart when
                                                           n_turns >=
                                                           MULTI_TURN_THRESHOLD)
+
+Plan and uncensored tiers are accessible via their dedicated agent
+modes (``agent.plan``, ``agent.plan-nofilter``) and slash commands;
+they are not auto-routed through ``model = auto``.
 
 The auto router's effective max context window is
 ``[code-fast].ctx_size`` -- fast is the bottom of the step-down
@@ -167,44 +154,13 @@ UNCENSORED_MODEL = os.getenv("ROUTER_UNCENSORED_MODEL", "plan-uncensored")
 #                still has comfortable headroom.
 HIGH_FIDELITY_CEILING = int(os.getenv("ROUTER_HIGH_FIDELITY_CEILING", "12000"))
 MID_FIDELITY_CEILING = int(os.getenv("ROUTER_MID_FIDELITY_CEILING", "32000"))
-# Floor the long-context rung at code-smart whenever a tool-call
-# protocol is in play -- 3B models tool-call unreliably regardless of
-# how big their context window is.
 MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "10"))
 AUTO_ALIASES = {"auto", "", None}
-
-UNCENSORED_TRIGGERS = re.compile(
-    r"(\[(uncensored|nofilter|no-?filter|heretic)\]"
-    r"|^[ \t]*(uncensored|nofilter|no-?filter)\s*:)",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 ULTRA_TRIGGERS = re.compile(
     r"(\[(ultra|opus)\]|^[ \t]*(ultra|opus)\s*:)",
     re.IGNORECASE | re.MULTILINE,
 )
-
-PLAN_SIGNALS = re.compile(
-    r"\b(plan|design|architect(ure)?|approach|trade-?off|"
-    r"should\s+we|how\s+would\s+(you|we)|what\s+would\s+you|"
-    r"explain\s+why|reason\s+about|think\s+(through|step|hard|carefully)|"
-    r"compare\s+(options|approaches)|review\s+(the|this|my)\s+"
-    r"(architecture|design|approach|plan)|brainstorm|outline|"
-    r"summari[sz]e|root\s*cause|migrate|port\s+to)\b",
-    re.IGNORECASE,
-)
-
-AGENT_SIGNALS = re.compile(
-    r"\b(implement|fix\s+(this|the|a|my)?\s*(bug|issue|error|test)|"
-    r"write\s+(a|the|some)?\s*(function|class|test|script|module|method)|"
-    r"add\s+(a|the)?\s*(function|class|method|test|file|endpoint)|"
-    r"create\s+(a|the)?\s*(function|class|file|component|endpoint)|"
-    r"refactor|edit|patch|generate\s+code|debug|trace|"
-    r"run\s+tests?|build\s+(it|this)|compile)\b",
-    re.IGNORECASE,
-)
-
-CODE_BLOCK = re.compile(r"```|`[^`\n]{30,}`")
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -221,12 +177,11 @@ async def _lifespan(app: FastAPI):
     bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
     log.info(
         "router up upstream=%s ladder=[ultra<=%d -> agent<=%d -> fast] "
-        "fast=%s agent=%s ultra=%s plan=%s uncensored=%s bedrock=%s",
+        "fast=%s agent=%s ultra=%s bedrock=%s",
         UPSTREAM, HIGH_FIDELITY_CEILING, MID_FIDELITY_CEILING,
         FAST_MODEL, AGENT_MODEL,
         f"{ULTRA_MODEL} (active)" if _ultra_available()
             else f"{ULTRA_MODEL} (unwired -- high-fidelity rung falls back to {AGENT_MODEL})",
-        PLAN_MODEL, UNCENSORED_MODEL,
         ",".join(bedrock_tiers) or "(none)",
     )
     yield
@@ -302,12 +257,6 @@ def _estimate_tokens(messages: list[dict[str, Any]] | None, prompt: str | None) 
     return chars // 4
 
 
-def _matches(pattern: re.Pattern[str], messages: list[dict[str, Any]] | None, prompt: str | None) -> bool:
-    if prompt and pattern.search(prompt):
-        return True
-    return any(pattern.search(t) for t in _iter_message_text(messages))
-
-
 def _ultra_available() -> bool:
     """True iff the ultra tier is loaded from ``models.ini``.
 
@@ -331,6 +280,11 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
 
     Step-DOWN ladder: top fidelity for short context, fall to mid for
     medium, drop to fast for long. See module docstring for rationale.
+
+    Only the fast / agent / ultra rungs are implemented here. Plan and
+    uncensored tiers are accessible via their dedicated agent modes
+    (``agent.plan``, ``agent.plan-nofilter``) and slash commands; they
+    are not auto-routed from the build agent.
     """
     messages = body.get("messages") if isinstance(body.get("messages"), list) else None
     prompt = body.get("prompt") if isinstance(body.get("prompt"), str) else None
@@ -341,50 +295,16 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
         for m in (messages or [])
         if m.get("role") == "system" and isinstance(m.get("content"), str)
     ]
-    if any(UNCENSORED_TRIGGERS.search(s) for s in (last_user, *sys_prompts) if s):
-        return UNCENSORED_MODEL, "uncensored-trigger"
 
     if any(ULTRA_TRIGGERS.search(s) for s in (last_user, *sys_prompts) if s):
         if _ultra_available():
             return ULTRA_MODEL, "ultra-trigger"
-        # Explicit user opt-in but the tier isn't wired up. Don't 404 --
-        # serve the request from the heaviest tier we *do* have and let
-        # the user notice in logs that their trigger was a no-op.
         log.warning("ultra-trigger ignored: %s not in models.ini; falling back to %s",
                     ULTRA_MODEL, AGENT_MODEL)
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
     n_turns = sum(1 for m in (messages or []) if m.get("role") == "user")
-    _last_msgs = [{"role": "user", "content": last_user}] if last_user else None
-    has_code_signal = (
-        _matches(CODE_BLOCK, _last_msgs, prompt)
-        or _matches(AGENT_SIGNALS, _last_msgs, prompt)
-    )
-
     est = _estimate_tokens(messages, prompt)
-
-    # Plan track is orthogonal to the code fidelity ladder: ``plan`` is a
-    # chat-tuned model meant for design / "should we" discussions. Only
-    # take it when nothing about the request says "I'm about to write
-    # code" (no triple-backticks, no agent verbs). Tools are stripped
-    # from the request body before dispatch (see ``_handle_completion``),
-    # so their presence here does not block plan routing.
-    # Only route to plan if the input fits in the planner's ctx_size --
-    # past that we fall through to the coding ladder which has tiers
-    # (smart, fast) explicitly sized for larger contexts.
-    if (
-        not has_code_signal
-        and _matches(PLAN_SIGNALS, messages, prompt)
-    ):
-        plan_tier = TIER_BY_ALIAS.get(PLAN_MODEL)
-        plan_ctx = plan_tier.ctx_size if plan_tier else 0
-        if not plan_ctx or est <= plan_ctx:
-            return PLAN_MODEL, "plan-signal"
-        log.info(
-            "plan-signal but tokens~%d > %s.ctx_size %d; "
-            "falling through to coding ladder",
-            est, PLAN_MODEL, plan_ctx,
-        )
 
     # Rung 1: short context -- start at the top.
     if est <= HIGH_FIDELITY_CEILING:
@@ -400,9 +320,7 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
         return AGENT_MODEL, f"mid-fidelity tokens~{est}<={MID_FIDELITY_CEILING}"
 
     # Rung 3: long context -- step down to fast. Floor at smart only
-    # when the multi-turn threshold is hit; tools alone no longer
-    # prevent the step-down (plan tiers strip tools before dispatch,
-    # and code-fast is a hosted model that tool-calls reliably).
+    # when the multi-turn threshold is hit.
     if n_turns >= MULTI_TURN_THRESHOLD:
         return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} (user-turns={n_turns}>={MULTI_TURN_THRESHOLD} floor)"
     return FAST_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING}"
@@ -531,14 +449,14 @@ async def list_models() -> JSONResponse:
             f"'{AGENT_MODEL}' up to ~{MID_FIDELITY_CEILING}, "
             f"'{FAST_MODEL}' beyond that."
         )
-        name = "Auto (step-down router: ultra/agent/fast + plan/uncensored)"
+        name = "Auto (step-down router: ultra/agent/fast)"
     else:
         top_blurb = (
             f"Step-down ladder (top->bottom as context grows): "
             f"'{AGENT_MODEL}' up to ~{MID_FIDELITY_CEILING} tokens, "
             f"'{FAST_MODEL}' beyond that."
         )
-        name = "Auto (step-down router: agent/fast + plan/uncensored)"
+        name = "Auto (step-down router: agent/fast)"
     data["data"].insert(0, {
         "id": "auto",
         "object": "model",
@@ -547,8 +465,6 @@ async def list_models() -> JSONResponse:
         "name": name,
         "description": (
             f"{top_blurb} "
-            f"'{PLAN_MODEL}' for design/planning (orthogonal to ladder); "
-            f"'{UNCENSORED_MODEL}' for explicit [nofilter] triggers; "
             f"'[ultra]'/'[opus]' triggers force '{ULTRA_MODEL}' regardless of size."
         ),
         "tier": "auto",
@@ -608,6 +524,41 @@ def _inject_sampler(body: dict[str, Any], tier: Tier) -> bool:
     return mutated
 
 
+def _inject_name_json(raw: bytes, tier_name: str) -> bytes:
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+    try:
+        msg = data["choices"][0]["message"]
+        if msg.get("content"):
+            msg["name"] = tier_name
+    except (KeyError, IndexError, TypeError):
+        pass
+    return json.dumps(data).encode()
+
+
+def _inject_name_sse(chunk: bytes, tier_name: str, injected: list[bool]) -> bytes:
+    if injected[0]:
+        return chunk
+    line = chunk.decode(errors="replace")
+    if not line.startswith("data: "):
+        return chunk
+    payload_str = line[len("data: "):].strip()
+    if payload_str in ("[DONE]", ""):
+        return chunk
+    try:
+        payload = json.loads(payload_str)
+        delta = payload["choices"][0]["delta"]
+        if "role" in delta:
+            delta["name"] = tier_name
+            injected[0] = True
+            return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        pass
+    return chunk
+
+
 async def _handle_completion(req: Request, path: str) -> Response:
     raw = await req.body()
     headers = _filter_request_headers(req)
@@ -631,11 +582,6 @@ async def _handle_completion(req: Request, path: str) -> Response:
         mutated = True
 
     chosen_name = body.get("model")
-    if chosen_name in {PLAN_MODEL, UNCENSORED_MODEL} and body.get("tools"):
-        log.info("plan tier %s: stripping tools from request", chosen_name)
-        body.pop("tools")
-        body.pop("tool_choice", None)
-        mutated = True
     tier = _resolve_tier(chosen_name)
     if tier is not None and _inject_sampler(body, tier):
         mutated = True
@@ -646,6 +592,28 @@ async def _handle_completion(req: Request, path: str) -> Response:
     if tier is not None and tier.is_bedrock:
         from llmstack.backends import bedrock as bedrock_backend
         resp = await bedrock_backend.dispatch(req, tier, body)
+    elif tier is not None and body.get("stream"):
+        proxy = await _stream_proxy(req.method, path, raw, headers)
+        injected: list[bool] = [False]
+        tier_name = tier.name
+        original_gen = proxy.body_iterator
+
+        async def _named_gen():
+            async for chunk in original_gen:
+                yield _inject_name_sse(chunk, tier_name, injected)
+
+        proxy.body_iterator = _named_gen()
+        resp = proxy
+    elif tier is not None:
+        proxy = await _stream_proxy(req.method, path, raw, headers)
+        raw_resp = b"".join([chunk async for chunk in proxy.body_iterator])
+        patched = _inject_name_json(raw_resp, tier.name)
+        resp = Response(
+            content=patched,
+            status_code=proxy.status_code,
+            headers=dict(proxy.headers),
+            media_type=proxy.media_type,
+        )
     else:
         resp = await _stream_proxy(req.method, path, raw, headers)
 
