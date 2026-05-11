@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-llmstack"
-version = "0.9.1"
+version = "0.9.2"
 description = "Multi-tier local LLM stack: llama-swap + FastAPI auto-router + opencode wiring."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "llmstack" }]
 keywords = ["llm", "llama-cpp", "llama-swap", "opencode", "router", "local-ai"]
 classifiers = [
@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
 ]
 
@@ -57,6 +58,13 @@ exclude = ["llmstack.bin*", "llmstack.tests*"]
 
 [tool.setuptools.package-data]
 llmstack = ["AGENTS.md", "models.ini"]
+
+[tool.setuptools.data-files]
+"" = ["LICENSE", "CHANGELOG.md", "UPGRADING.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["llmstack/tests"]
+addopts = "-v"
 
 [tool.ruff]
 line-length = 100

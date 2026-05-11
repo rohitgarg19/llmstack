@@ -2,19 +2,171 @@
 
 from __future__ import annotations
 
-from llmstack.generators.llama_swap import render as render_llama_swap
+from llmstack.generators.opencode import build_config
+
+GGUF_INI = """
+[DEFAULT]
+host         = 127.0.0.1
+router_port  = 10101
+
+[code-fast]
+tier     = code
+role     = fast
+hf_repo  = bartowski/Qwen2.5-Coder-3B-Instruct-GGUF
+hf_file  = Qwen2.5-Coder-3B-Instruct-Q5_K_M.gguf
+ctx_size = 131072
+sampler  = temp=0.2
+description = Qwen2.5-Coder 3B fast
+
+[code-smart]
+tier     = code
+role     = agent
+hf_repo  = unsloth/Qwen3-Coder-Next-GGUF
+hf_file  = Qwen3-Coder-Next-Q4_K_M.gguf
+ctx_size = 64000
+sampler  = temp=0.5
+description = Qwen3-Coder-Next agent
+
+[plan]
+tier     = chat
+role     = plan
+hf_repo  = Jackrong/Qwopus-GLM-18B-Merged-GGUF
+hf_file  = Qwopus-GLM-18B-Healed-Q4_K_M.gguf
+ctx_size = 65536
+sampler  = temp=0.7
+description = Qwopus plan
+
+[plan-uncensored]
+tier     = chat
+role     = plan-uncensored
+hf_repo  = mradermacher/Mistral-Small-3.2-24B-Instruct-GGUF
+hf_file  = Mistral-Small.gguf
+ctx_size = 131072
+sampler  = temp=0.85
+description = Mistral uncensored
+
+[ROUTING]
+high_fidelity_ceiling = 12000
+mid_fidelity_ceiling  = 32000
+multi_turn            = 10
+"""
+
+BEDROCK_INI = """
+[DEFAULT]
+host        = 127.0.0.1
+router_port = 10101
+
+[code-fast]
+tier         = code
+role         = fast
+backend      = bedrock
+aws_model_id = eu.anthropic.claude-haiku-4-5-20251001-v1:0
+aws_region   = eu-west-3
+ctx_size     = 200000
+description  = Haiku fast
+
+[code-smart]
+tier         = code
+role         = agent
+backend      = bedrock
+aws_model_id = eu.anthropic.claude-sonnet-4-6
+aws_region   = eu-west-3
+ctx_size     = 200000
+description  = Sonnet agent
+
+[ROUTING]
+high_fidelity_ceiling = 12000
+mid_fidelity_ceiling  = 32000
+"""
+
+
+class TestBuildConfigGguf:
+    def setup_method(self):
+        self.cfg = build_config(ini_text=GGUF_INI)
+
+    def test_schema_present(self):
+        assert "$schema" in self.cfg
+
+    def test_provider_key(self):
+        assert "llama.cpp" in self.cfg["provider"]
+
+    def test_base_url_uses_ini_host_port(self):
+        url = self.cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        assert "127.0.0.1:10101" in url
+
+    def test_auto_model_present(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert "auto" in models
+
+    def test_auto_ctx_equals_fast_ctx(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["auto"]["limit"]["context"] == 131072
+
+    def test_small_model_wired_to_fast(self):
+        assert self.cfg["small_model"] == "llama.cpp/code-fast"
+
+    def test_build_agent_wired_to_auto(self):
+        assert self.cfg["agent"]["build"]["model"] == "llama.cpp/auto"
+
+    def test_plan_agent_wired_to_plan_tier(self):
+        assert self.cfg["agent"]["plan"]["model"] == "llama.cpp/plan"
+
+    def test_plan_agent_is_read_only(self):
+        perm = self.cfg["agent"]["plan"]["permission"]
+        assert perm["bash"] == "deny"
+
+    def test_plan_nofilter_agent_present(self):
+        assert "plan-nofilter" in self.cfg["agent"]
+
+    def test_all_tiers_in_models(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        for name in ("code-fast", "code-smart", "plan", "plan-uncensored"):
+            assert name in models
+
+    def test_no_sampler_params_in_agents(self):
+        for agent in self.cfg.get("agent", {}).values():
+            assert "temperature" not in agent
+            assert "top_p" not in agent
+
+    def test_commands_present(self):
+        assert "review" in self.cfg["command"]
+        assert "nofilter" in self.cfg["command"]
+
+
+class TestBuildConfigBedrock:
+    def setup_method(self):
+        self.cfg = build_config(ini_text=BEDROCK_INI)
+
+    def test_auto_ctx_equals_fast_ctx(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["auto"]["limit"]["context"] == 200000
+
+    def test_small_model_wired_to_fast(self):
+        assert self.cfg["small_model"] == "llama.cpp/code-fast"
+
+    def test_build_agent_wired_to_auto(self):
+        assert self.cfg["agent"]["build"]["model"] == "llama.cpp/auto"
+
+
+class TestBuildConfigRemote:
+    def test_remote_url_overrides_base_url(self):
+        cfg = build_config(ini_text=GGUF_INI, remote="http://10.0.0.5:10101")
+        url = cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        assert url == "http://10.0.0.5:10101/v1"
+
+    def test_local_url_used_when_no_remote(self):
+        cfg = build_config(ini_text=GGUF_INI, remote=None)
+        url = cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        assert "127.0.0.1:10101" in url
 
 
 class TestLlamaSwapRender:
-    """Tests for llama-swap config rendering."""
-
     def test_render_returns_string(self):
+        from llmstack.generators.llama_swap import render as render_llama_swap
         result = render_llama_swap()
         assert isinstance(result, str)
 
     def test_render_contains_tier_info(self):
-
-        # We can't easily inject tiers here since render() reads from models.ini
-        # Just verify the function runs and returns valid YAML
+        from llmstack.generators.llama_swap import render as render_llama_swap
         result = render_llama_swap()
         assert "llama_server" in result or "matrix" in result

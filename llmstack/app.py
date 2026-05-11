@@ -212,6 +212,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("router")
 
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global client
@@ -423,7 +424,8 @@ def _filter_response_headers(resp: httpx.Response) -> dict[str, str]:
 
 
 async def _stream_proxy(method: str, path: str, body: bytes, headers: dict[str, str]) -> StreamingResponse:
-    assert client is not None
+    if client is None:
+        raise RuntimeError("HTTP client not initialised — lifespan not started")
     upstream_req = client.build_request(method, path, content=body, headers=headers)
     upstream = await client.send(upstream_req, stream=True)
 
@@ -489,7 +491,8 @@ async def serve_models_ini() -> Response:
 
 @app.get("/v1/models")
 async def list_models() -> JSONResponse:
-    assert client is not None
+    if client is None:
+        raise RuntimeError("HTTP client not initialised — lifespan not started")
     try:
         r = await client.get("/v1/models")
         data = r.json()
@@ -614,9 +617,14 @@ async def _handle_completion(req: Request, path: str) -> Response:
         return await _stream_proxy(req.method, path, raw, headers)
 
     mutated = False
+    est_tokens: int | None = None
     requested = body.get("model")
     if requested in AUTO_ALIASES or requested == "auto":
         chosen, reason = classify(body)
+        est_tokens = _estimate_tokens(
+            body.get("messages") if isinstance(body.get("messages"), list) else None,
+            body.get("prompt") if isinstance(body.get("prompt"), str) else None,
+        )
         body["model"] = chosen
         log.info("auto -> %s (%s) [path=%s]", chosen, reason, path)
         mutated = True
@@ -636,9 +644,13 @@ async def _handle_completion(req: Request, path: str) -> Response:
 
     if tier is not None and tier.is_bedrock:
         from llmstack.backends import bedrock as bedrock_backend
-        return await bedrock_backend.dispatch(req, tier, body)
+        resp = await bedrock_backend.dispatch(req, tier, body)
+    else:
+        resp = await _stream_proxy(req.method, path, raw, headers)
 
-    return await _stream_proxy(req.method, path, raw, headers)
+    if est_tokens is not None:
+        resp.headers["X-LLMStack-Tokens"] = str(est_tokens)
+    return resp
 
 
 @app.post("/v1/chat/completions")

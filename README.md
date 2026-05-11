@@ -83,9 +83,9 @@ First match wins:
 | 1 | last user msg contains `[nofilter]`, `[uncensored]`, `[heretic]`, or starts with `uncensored:` / `nofilter:` | `plan-uncensored` | explicit opt-in |
 | 2 | `[ultra]` / `[opus]` / `ultra:` trigger AND `code-ultra` tier configured | `code-ultra` | explicit top-tier opt-in |
 | 3 | plan verbs (*design, architect, approach, trade-off, should we, explain why, …*) AND no code blocks / agent verbs / tools | `plan` | pure design discussion (orthogonal track) |
-| 4 | estimated input ≤ 8 000 tokens | `code-ultra` *(or `code-smart` if ultra unwired)* | top tier — context still being built, latency/$ are best here |
+| 4 | estimated input ≤ 12 000 tokens | `code-ultra` *(or `code-smart` if ultra unwired)* | top tier — context still being built, latency/$ are best here |
 | 5 | estimated input ≤ 32 000 tokens | `code-smart` | mid-context, local heavy coder is at its sweet spot |
-| 6 | otherwise (long context) AND (`tools[]` OR ≥ 6 turns) | `code-smart` | floor: 3B model tool-calls unreliably |
+| 6 | otherwise (long context) AND ≥ 10 user turns | `code-smart` | floor: deep agentic loop, keep the heavy model |
 | 7 | otherwise (long context) | `code-fast` | 128k YaRN window + always-resident + free |
 
 Token estimates are `chars / 4` over all message text + `prompt`. The
@@ -150,12 +150,12 @@ from any directory you previously ran `install` in.
 ## Layout
 
 ```
-opencode/                       # repo root
+llmstack/                       # repo root
 ├── pyproject.toml              # package metadata + `llmstack` console script
 ├── README.md                   # this file
 ├── UPGRADING.md                # how to swap any tier for a newer/better model
 │                                  + how to upgrade the Python toolchain itself
-├── models.ini                  # SINGLE SOURCE OF TRUTH for tiers + sampler
+├── LICENSE                     # MIT
 └── llmstack/                   # the python package (importable, installable)
     ├── __init__.py
     ├── __main__.py             # `python -m llmstack`
@@ -164,6 +164,7 @@ opencode/                       # repo root
     ├── shell_env.py            # spawn the env-prepared subshell + activate hooks
     ├── app.py                  # FastAPI auto-router (~280 lines)
     ├── tiers.py                # parse models.ini -> Tier dataclasses
+    ├── models.ini              # SINGLE SOURCE OF TRUTH for tiers + sampler (bundled template)
     ├── check_models.py         # snapshot tool (HF metadata + drift check)
     ├── AGENTS.md               # opencode agent template (shipped as package data)
     ├── generators/
@@ -178,9 +179,9 @@ opencode/                       # repo root
         ├── install_llama_swap.py
         ├── download.py
         ├── start.py
-        ├── shell.py
         ├── stop.py
         ├── restart.py
+        ├── reload.py
         ├── status.py
         ├── check.py
         └── activate.py
@@ -509,7 +510,7 @@ All knobs are env vars; defaults are picked up by `llmstack start`.
 | `ROUTER_UNCENSORED_MODEL` | `plan-uncensored` | `[nofilter]` triggers → here |
 | `ROUTER_HIGH_FIDELITY_CEILING` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
 | `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
-| `ROUTER_MULTI_TURN` | `6` | turn count that floors the long-context rung at `code-smart` |
+| `ROUTER_MULTI_TURN` | `10` | user-turn count that floors the long-context rung at `code-smart` |
 | `ROUTER_HOST` / `ROUTER_PORT` | `127.0.0.1` / `10101` | listen address |
 | `LOG_LEVEL` | `info` | router log level |
 

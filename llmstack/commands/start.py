@@ -54,7 +54,6 @@ from llmstack.commands._helpers import (
 from llmstack.generators import render_to
 from llmstack.generators.llama_swap import render as render_yaml
 from llmstack.generators.llama_swap import validate as validate_yaml
-from llmstack.tiers import load_tiers
 from llmstack.paths import (
     DEFAULT_REMOTE_URL,
     ROUTER_PORT,

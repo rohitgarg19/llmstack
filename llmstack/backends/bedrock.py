@@ -446,7 +446,8 @@ def _build_converse_kwargs(tier: Tier, body: dict[str, Any], cfg: BedrockConfig)
     next), passed in so the caller controls the channel and we don't
     re-read the env mid-call.
     """
-    assert tier.bedrock is not None
+    if tier.bedrock is None:
+        raise TypeError(f"_build_converse_kwargs called on non-bedrock tier {tier.name!r}")
     messages = body.get("messages")
     if not isinstance(messages, list):
         # /v1/completions style: synthesise a single user message
@@ -763,7 +764,8 @@ async def _stream_response(client: Any, tier: Tier, converse_kwargs: dict[str, A
 
 def model_descriptor(tier: Tier) -> dict[str, Any]:
     """Return an OpenAI-style ``/v1/models`` entry for a bedrock tier."""
-    assert tier.bedrock is not None
+    if tier.bedrock is None:
+        raise TypeError(f"model_descriptor called on non-bedrock tier {tier.name!r}")
     use_next = _use_next()
     active = tier.bedrock.resolved(use_next=use_next)
     channel = "next" if (use_next and tier.bedrock.has_next) else "current"
