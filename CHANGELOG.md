@@ -4,6 +4,21 @@ All notable changes to `opencode-llmstack` are documented here.
 
 ---
 
+## [0.9.4] — 2026-05-11
+
+### Fixed
+- `classify()` now scopes `has_code_signal` to the **last user message only**
+  (was scanning the full conversation history). Previously, any prior coding
+  exchange in the session (code blocks, agent verbs) would permanently block
+  plan routing for the rest of the conversation — e.g. "explain why these
+  changes are important?" after a refactor request would never reach `plan`.
+- Added regression test:
+  `test_plan_signal_after_prior_coding_exchange_routes_to_plan`.
+- `__version__` corrected from `"0.9.2"` to `"0.9.4"` (was skewed vs
+  `pyproject.toml` since 0.9.3).
+
+---
+
 ## [0.9.2] — 2026-05-11
 
 ### Fixed

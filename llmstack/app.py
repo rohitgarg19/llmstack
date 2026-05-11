@@ -355,9 +355,10 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
     n_turns = sum(1 for m in (messages or []) if m.get("role") == "user")
+    _last_msgs = [{"role": "user", "content": last_user}] if last_user else None
     has_code_signal = (
-        _matches(CODE_BLOCK, messages, prompt)
-        or _matches(AGENT_SIGNALS, messages, prompt)
+        _matches(CODE_BLOCK, _last_msgs, prompt)
+        or _matches(AGENT_SIGNALS, _last_msgs, prompt)
     )
 
     est = _estimate_tokens(messages, prompt)

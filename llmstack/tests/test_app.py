@@ -259,3 +259,14 @@ class TestClassify:
         with self._with_ultra(False):
             model, reason = classify(body)
         assert model != PLAN_MODEL
+
+    def test_plan_signal_after_prior_coding_exchange_routes_to_plan(self):
+        messages = [
+            {"role": "user", "content": "refactor this function for clarity:\n```python\ndef f(x): return x*2\n```"},
+            {"role": "assistant", "content": "Sure, here is the refactored version."},
+            {"role": "user", "content": "explain why these changes are important?"},
+        ]
+        body = {"messages": messages}
+        with self._with_ultra(False):
+            model, reason = classify(body)
+        assert model == PLAN_MODEL, f"expected plan, got {model} ({reason})"
