@@ -194,7 +194,7 @@ def build_config(
 
     models: dict[str, dict] = {
         "auto": {
-            "name":      "Auto (router selects: fast / agent / plan / uncensored)",
+            "name":      "Auto (router selects: fast / agent / ultra)",
             "limit":     {"context": auto_ctx, "output": 16384},
             "tool_call": True,
             "cost":      ZERO_COST,
