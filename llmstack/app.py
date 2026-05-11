@@ -127,8 +127,6 @@ UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
 FAST_MODEL = os.getenv("ROUTER_FAST_MODEL", "code-fast")
 AGENT_MODEL = os.getenv("ROUTER_AGENT_MODEL", "code-smart")
 ULTRA_MODEL = os.getenv("ROUTER_ULTRA_MODEL", "code-ultra")
-PLAN_MODEL = os.getenv("ROUTER_PLAN_MODEL", "plan")
-UNCENSORED_MODEL = os.getenv("ROUTER_UNCENSORED_MODEL", "plan-uncensored")
 
 # Step-DOWN ladder (see module docstring). Both ceilings are *upper
 # bounds* of a tier's sweet-spot range, expressed in estimated input

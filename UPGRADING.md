@@ -266,7 +266,7 @@ How to evaluate:
 - Run `llama-bench -m <new>.gguf -p 512 -n 128 -ngl 999` for raw speed
 - Sniff test with a typical autocomplete prompt; latency should feel like
   the cursor is barely ahead of you
-- Aider leaderboard "edit format" column — proxy for FIM quality
+- [Aider leaderboard](https://aider.chat/docs/leaderboards/) "edit format" column — proxy for FIM quality
 
 Size budget: **~2–6 GB** weights (we want this resident permanently while
 sharing memory with the heavy tier).
@@ -287,10 +287,10 @@ What matters:
 - **Speed at full context** (MoE models win here on Apple Silicon)
 
 How to evaluate:
-- Aider's [LLM Leaderboard](https://aider.chat/docs/leaderboards/) — most
+- [Aider's LLM Leaderboard](https://aider.chat/docs/leaderboards/) — most
   honest signal for agentic coding
-- LiveCodeBench scores
-- SWE-Bench Verified (the "real PRs" benchmark)
+- [LiveCodeBench](https://livecodebench.github.io/leaderboard.html) scores
+- [SWE-Bench Verified](https://www.swebench.com/) (the "real PRs" benchmark)
 - Run an actual opencode session in `build` mode against your repo
 
 Size budget: **~30–55 GB** weights (must fit alongside `code-fast` ≈ 5 GB
@@ -311,8 +311,8 @@ What matters:
 - **Refusals on edge cases** — fine to refuse weird stuff in plain plan mode
 
 How to evaluate:
-- Open LLM Leaderboard (filter to chat/instruct, your size class)
-- Chatbot Arena — vibes-based but useful proxy
+- [Open LLM Leaderboard](https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard) (filter to chat/instruct, your size class)
+- [Chatbot Arena](https://lmarena.ai/) — vibes-based but useful proxy
 - Hand-roll a "design this rate limiter" prompt and compare outputs
 
 Size budget: **~7–25 GB** weights — this tier shouldn't dominate memory.
@@ -360,12 +360,12 @@ Same size budget as `plan`.
 
 | Tier | Leaderboard |
 |---|---|
-| `code-fast` / `code-smart` | https://aider.chat/docs/leaderboards/ |
-|                            | https://livecodebench.github.io/leaderboard.html |
-|                            | https://www.swebench.com/ (Verified split) |
-| `plan` / `plan-uncensored` | https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard |
-|                            | https://lmarena.ai/ |
-|                            | https://livebench.ai/ |
+| `code-fast` / `code-smart` | [Aider LLM Leaderboard](https://aider.chat/docs/leaderboards/) |
+|                            | [LiveCodeBench](https://livecodebench.github.io/leaderboard.html) |
+|                            | [SWE-Bench Verified](https://www.swebench.com/) |
+| `plan` / `plan-uncensored` | [Open LLM Leaderboard](https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard) |
+|                            | [Chatbot Arena](https://lmarena.ai/) |
+|                            | [LiveBench](https://livebench.ai/) |
 
 **Community signal** (qualitative but valuable):
 

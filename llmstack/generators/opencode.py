@@ -69,7 +69,7 @@ COMMANDS = {
         "agent":       "plan",
     },
     "nofilter": {
-        "template":    "[nofilter]",
+        "template":    "",
         "description": "Route to the uncensored planning model.",
         "agent":       "plan-nofilter",
     },

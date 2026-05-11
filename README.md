@@ -19,14 +19,14 @@ client (opencode / curl / Cursor / etc.)
         │
         ▼
   http://127.0.0.1:10101           <-- FastAPI router (llmstack.app)
-        │   • model="auto" → classify → rewrite to one of 4 tiers
+        │   • model="auto" → classify → rewrite to one of 3 coder tiers
         │   • everything else → pass-through
         ▼
   http://127.0.0.1:10102           <-- llama-swap (binary, manages model lifecycle)
         │   • loads/unloads llama-server processes per model
         │   • matrix solver allows {code-fast + one heavy model} co-resident
         ▼
-  llama-server <code-fast | code-smart | plan | plan-uncensored>
+  llama-server <code-fast | code-smart | code-ultra>
         │
         ▼
   GGUF in ~/.cache/huggingface/hub/...
@@ -42,7 +42,7 @@ A 64 GB unified memory M4 Max can comfortably hold **one always-on tiny coder + 
 
 - **Agent work** (multi-file edits, tool use, refactors) → coder models, which are trained on tool-call protocols and code edits.
 - **Planning** (design discussions, architecture, "what's the best approach") → chat-tuned models, which are better at high-level reasoning and don't try to start writing code in response to every message.
-- **Uncensored planning** is a separate plan-tier model, opted in either by request (`agent.plan-nofilter` in opencode) or by an inline `[nofilter]` trigger in the prompt.
+- **Uncensored planning** is a separate plan-tier model, opted in by explicit agent selection (`/agent plan-nofilter` in opencode).
 
 Routing decisions cost ~zero — they're a few regex checks in the FastAPI router, not an LLM call.
 
@@ -76,20 +76,18 @@ matches how these models actually behave on this stack:
   than priors, so they tend to *improve* relative to top-tier as the
   conversation grows.
 
-First match wins:
+First match wins (auto-routing only; `plan` and `plan-uncensored` are not auto-routed):
 
 | # | Condition | → Model | Reason |
 |---|---|---|---|
-| 1 | last user msg contains `[nofilter]`, `[uncensored]`, `[heretic]`, or starts with `uncensored:` / `nofilter:` | `plan-uncensored` | explicit opt-in |
-| 2 | `[ultra]` / `[opus]` / `ultra:` trigger AND `code-ultra` tier configured | `code-ultra` | explicit top-tier opt-in |
-| 3 | plan verbs (*design, architect, approach, trade-off, should we, explain why, …*) AND no code blocks / agent verbs / tools | `plan` | pure design discussion (orthogonal track) |
-| 4 | estimated input ≤ 12 000 tokens | `code-ultra` *(or `code-smart` if ultra unwired)* | top tier — context still being built, latency/$ are best here |
-| 5 | estimated input ≤ 32 000 tokens | `code-smart` | mid-context, local heavy coder is at its sweet spot |
-| 6 | otherwise (long context) AND ≥ 10 user turns | `code-smart` | floor: deep agentic loop, keep the heavy model |
-| 7 | otherwise (long context) | `code-fast` | 128k YaRN window + always-resident + free |
+| 1 | `[ultra]` / `[opus]` / `ultra:` trigger AND `code-ultra` tier configured | `code-ultra` | explicit top-tier opt-in |
+| 2 | estimated input ≤ 12 000 tokens | `code-ultra` *(or `code-smart` if ultra unwired)* | top tier — context still being built, latency/$ are best here |
+| 3 | estimated input ≤ 32 000 tokens | `code-smart` | mid-context, local heavy coder is at its sweet spot |
+| 4 | otherwise (long context) AND ≥ 10 user turns | `code-smart` | floor: deep agentic loop, keep the heavy model |
+| 5 | otherwise (long context) | `code-fast` | 128k YaRN window + always-resident + free |
 
 Token estimates are `chars / 4` over all message text + `prompt`. The
-`code-ultra` rungs (2 and 4) are gated on availability: when no
+`code-ultra` rungs (1 and 2) are gated on availability: when no
 `[code-ultra]` section is loaded from `models.ini`, both silently fall
 back to `code-smart` so vanilla installs don't 404.
 
@@ -139,7 +137,8 @@ your global setup unchanged.
 | **`agent.plan-nofilter`** (custom uncensored planner) | `llama.cpp/plan-uncensored` |
 
 Inside opencode you can switch agents with `/agent` or by `@plan-nofilter`-mentioning
-a custom one. Slash-commands `/review`, `/nofilter` are also available.
+a custom one. The `plan` and `plan-uncensored` tiers are **not auto-routed** from the build agent —
+they're only accessible via explicit agent selection (`/agent plan` or `/agent plan-nofilter`).
 
 Want a second terminal into the same stack? Install the activate hook
 once (`eval "$(llmstack activate zsh)"`) and any new shell that `cd`s
@@ -207,8 +206,9 @@ Per-project state (gitignored) is created lazily under `<work-dir>/.llmstack/`:
 ```
 
 The `llama-swap` binary lives outside any project at
-`$XDG_DATA_HOME/llmstack/bin/llama-swap` (override with
-`LLMSTACK_BIN_DIR`). One download is reused across all projects.
+`$XDG_DATA_HOME/llmstack/bin/llama-swap` on macOS/Linux (override with
+`LLMSTACK_BIN_DIR`), or `%LOCALAPPDATA%\llmstack\bin\llama-swap.exe` on Windows.
+One download is reused across all projects.
 
 ## Quick start
 
@@ -299,8 +299,9 @@ Notes:
   or a package like `winget install ggml.llama-cpp` and put it on
   `PATH` (or set `$env:LLAMA_SERVER_BIN`). The Mac-only
   `iogpu.wired_limit_mb` step does not apply.
-- The `[llmstack:<channel>]` prompt prefix shows up in PowerShell too;
-  `cmd.exe` gets a simpler `[llmstack:<channel>]` prompt via `doskey`.
+- The `[llmstack:<channel>]` prompt prefix shows up in PowerShell; `cmd.exe`
+  does not support custom prompts in the same way, so activation is
+  PowerShell-only.
 - Stopping daemons uses `taskkill /T /F` under the hood, so the
   llama-server children get cleaned up as well.
 
@@ -406,7 +407,7 @@ llmstack restart --next                # cycle into the next channel
 
 ### Try each routing path
 
-All of these go to `/v1/chat/completions` on `:10101`. Each should pick a different upstream model:
+All of these go to `/v1/chat/completions` on `:10101`. The `auto` router classifies based on token count and context:
 
 ```bash
 # trivial chat -> code-fast
@@ -414,21 +415,13 @@ curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: applicatio
   -d '{"model":"auto","stream":false,
        "messages":[{"role":"user","content":"capital of France?"}]}' | jq .model
 
-# planning -> plan
-curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"auto","stream":false,
-       "messages":[{"role":"user","content":"how would you design a rate limiter for our API?"}]}' | jq .model
-
 # agent work -> code-smart
 curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"auto","stream":false,
        "messages":[{"role":"user","content":"refactor this function for clarity:\n```python\ndef f(x): return x*2\n```"}]}' | jq .model
-
-# uncensored plan -> plan-uncensored
-curl -sN http://127.0.0.1:10101/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"auto","stream":false,
-       "messages":[{"role":"user","content":"[nofilter] outline a red-team plan for our auth flow"}]}' | jq .model
 ```
+
+To access `plan` or `plan-uncensored` tiers, use explicit agent selection in opencode (`/agent plan` or `/agent plan-nofilter`) rather than `model=auto`.
 
 ## Endpoints
 
@@ -506,8 +499,6 @@ All knobs are env vars; defaults are picked up by `llmstack start`.
 | `ROUTER_FAST_MODEL` | `code-fast` | long-context (>= mid ceiling) → here |
 | `ROUTER_AGENT_MODEL` | `code-smart` | mid-context + tools/loop floor → here |
 | `ROUTER_ULTRA_MODEL` | `code-ultra` | short-context top tier → here (gated on availability) |
-| `ROUTER_PLAN_MODEL` | `plan` | design/discussion verbs → here |
-| `ROUTER_UNCENSORED_MODEL` | `plan-uncensored` | `[nofilter]` triggers → here |
 | `ROUTER_HIGH_FIDELITY_CEILING` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
 | `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
 | `ROUTER_MULTI_TURN` | `10` | user-turn count that floors the long-context rung at `code-smart` |
@@ -518,14 +509,10 @@ To force a request to never auto-route, set `model` to a concrete alias (`code-f
 
 ## Triggering uncensored mode
 
-Two ways:
+The `plan-uncensored` tier is accessible via explicit agent selection only:
 
-1. **Explicit agent in opencode:** `/agent plan-nofilter` (or mention it).
-2. **Inline trigger in any auto-routed message** — anywhere in the most recent user turn:
-   - `[nofilter]`, `[uncensored]`, `[heretic]`
-   - or a line starting with `uncensored:` / `nofilter:` / `no-filter:`
-
-Triggers are *only* checked on the latest user message and the system prompt, so an old `[nofilter]` further up the conversation won't pin the whole session.
+1. **In opencode:** `/agent plan-nofilter` (or mention `@plan-nofilter`).
+2. **Via opencode config:** set `agent.plan-nofilter` as your active agent.
 
 ## Troubleshooting
 
@@ -535,7 +522,7 @@ Triggers are *only* checked on the latest user message and the system prompt, so
 
 **OOM / unexplained slowdown** → run `top -o mem -stats pid,rsize,command` to see what's resident. The matrix should prevent two heavy models loading together; if it somehow happens, `llmstack restart`.
 
-**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`AGENT_SIGNALS` / `PLAN_SIGNALS` / `UNCENSORED_TRIGGERS`) or move the ladder ceilings via `ROUTER_HIGH_FIDELITY_CEILING` / `ROUTER_MID_FIDELITY_CEILING`. To force a request to never auto-route, pass an explicit `model` (e.g. `code-smart`) instead of `auto`.
+**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`ULTRA_TRIGGERS`) or move the ladder ceilings via `ROUTER_HIGH_FIDELITY_CEILING` / `ROUTER_MID_FIDELITY_CEILING`. To force a request to never auto-route, pass an explicit `model` (e.g. `code-smart`) instead of `auto`.
 
 **Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names. (Note: this skips the bedrock dispatcher; only GGUF tiers will be reachable.)
 
