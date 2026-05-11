@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from llmstack.paths import MODELS_INI_TEMPLATE, models_ini_path, require_models_ini
 
