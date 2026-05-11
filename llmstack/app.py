@@ -90,16 +90,13 @@ Routing decision tree (first match wins):
      ("reasonable context still being built")         -> code-ultra
                                                          (else code-smart)
   5. Estimated input tokens <= MID_FIDELITY_CEILING   -> code-smart
-  6. Otherwise (long context, top-tier becomes
-     expensive/slow, fast tier's 128k window is the
-     best fit and it's free)                          -> code-fast
+   6. Otherwise (long context, top-tier becomes
+      expensive/slow, fast tier's 128k window is the
+      best fit and it's free)                          -> code-fast
                                                          (floored at
                                                           code-smart when
-                                                          ``tools[]`` is set
-                                                          or n_turns >=
-                                                          MULTI_TURN_THRESHOLD,
-                                                          since 3B models
-                                                          tool-call unreliably)
+                                                          n_turns >=
+                                                          MULTI_TURN_THRESHOLD)
 
 The auto router's effective max context window is
 ``[code-fast].ctx_size`` -- fast is the bottom of the step-down
@@ -356,7 +353,6 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
                     ULTRA_MODEL, AGENT_MODEL)
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
-    has_tools = bool(body.get("tools"))
     n_turns = len(messages) if messages else 0
     has_code_signal = (
         _matches(CODE_BLOCK, messages, prompt)
@@ -368,14 +364,14 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     # Plan track is orthogonal to the code fidelity ladder: ``plan`` is a
     # chat-tuned model meant for design / "should we" discussions. Only
     # take it when nothing about the request says "I'm about to write
-    # code" (no triple-backticks, no agent verbs, no tool calls). And
-    # only if the input fits in the planner's ctx_size -- past that we'd
-    # be sending a request the planner can't hold, so we fall through
-    # to the coding ladder, which has tiers (smart, fast) explicitly
-    # sized for larger contexts.
+    # code" (no triple-backticks, no agent verbs). Tools are stripped
+    # from the request body before dispatch (see ``_handle_completion``),
+    # so their presence here does not block plan routing.
+    # Only route to plan if the input fits in the planner's ctx_size --
+    # past that we fall through to the coding ladder which has tiers
+    # (smart, fast) explicitly sized for larger contexts.
     if (
-        not has_tools
-        and not has_code_signal
+        not has_code_signal
         and _matches(PLAN_SIGNALS, messages, prompt)
     ):
         plan_tier = TIER_BY_ALIAS.get(PLAN_MODEL)
@@ -401,12 +397,12 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     if est <= MID_FIDELITY_CEILING:
         return AGENT_MODEL, f"mid-fidelity tokens~{est}<={MID_FIDELITY_CEILING}"
 
-    # Rung 3: long context -- step down to fast (128k YaRN, free,
-    # always-resident). Floor at smart when tools/agent loop is in
-    # play; the 3B coder doesn't tool-call reliably.
-    if has_tools or n_turns >= MULTI_TURN_THRESHOLD:
-        why = "tools" if has_tools else f"turns={n_turns}"
-        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} ({why} floor)"
+    # Rung 3: long context -- step down to fast. Floor at smart only
+    # when the multi-turn threshold is hit; tools alone no longer
+    # prevent the step-down (plan tiers strip tools before dispatch,
+    # and code-fast is a hosted model that tool-calls reliably).
+    if n_turns >= MULTI_TURN_THRESHOLD:
+        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} (turns={n_turns} floor)"
     return FAST_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING}"
 
 
@@ -626,6 +622,11 @@ async def _handle_completion(req: Request, path: str) -> Response:
         mutated = True
 
     chosen_name = body.get("model")
+    if chosen_name in {PLAN_MODEL, UNCENSORED_MODEL} and body.get("tools"):
+        log.info("plan tier %s: stripping tools from request", chosen_name)
+        body.pop("tools")
+        body.pop("tool_choice", None)
+        mutated = True
     tier = _resolve_tier(chosen_name)
     if tier is not None and _inject_sampler(body, tier):
         mutated = True
