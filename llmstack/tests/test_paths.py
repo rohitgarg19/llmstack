@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
-from llmstack.paths import models_ini_path, require_models_ini
+from llmstack.paths import MODELS_INI_TEMPLATE, models_ini_path, require_models_ini
+
+
+@pytest.fixture(autouse=True)
+def use_bundled_models_ini(monkeypatch):
+    monkeypatch.setenv("LLMSTACK_MODELS_INI", str(MODELS_INI_TEMPLATE))
 
 
 class TestModelsIniPath:

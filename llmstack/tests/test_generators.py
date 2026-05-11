@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from llmstack.generators.opencode import build_config
+from llmstack.paths import MODELS_INI_TEMPLATE
 
 GGUF_INI = """
 [DEFAULT]
@@ -161,6 +164,10 @@ class TestBuildConfigRemote:
 
 
 class TestLlamaSwapRender:
+    @pytest.fixture(autouse=True)
+    def use_bundled_models_ini(self, monkeypatch):
+        monkeypatch.setenv("LLMSTACK_MODELS_INI", str(MODELS_INI_TEMPLATE))
+
     def test_render_returns_string(self):
         from llmstack.generators.llama_swap import render as render_llama_swap
         result = render_llama_swap()
