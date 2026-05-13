@@ -33,8 +33,9 @@ client (opencode / curl / Cursor / etc.)
 ```
 
 The whole thing is a pure Python package distributed via standard Python tooling
-(`pip install llmstack`, or `pip install -e .` from this repo). Once installed
-you get a single `llmstack` console-script.
+(`pip install opencode-llmstack`, or `pip install -e .` from this repo). Once installed
+you get a single `llmstack` console-script. For enabling AWS bedrock, you need to install
+optional (`pip install opencode-llmstack[bedrock]`).
 
 ## Why this design
 
