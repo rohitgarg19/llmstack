@@ -189,6 +189,51 @@ class TestBuildConfigRemote:
         assert "127.0.0.1:10101" in url
 
 
+_NO_PLAN_UNCENSORED_INI = """
+[DEFAULT]
+host        = 127.0.0.1
+router_port = 10101
+
+[code-fast]
+tier     = code
+role     = fast
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 32768
+description = fast tier
+
+[code-smart]
+tier     = code
+role     = agent
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 65536
+description = agent tier
+
+[plan]
+tier     = chat
+role     = plan
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 65536
+description = plan tier
+"""
+
+
+class TestNoPlanUncensoredTier:
+    def setup_method(self):
+        self.cfg = build_config(ini_text=_NO_PLAN_UNCENSORED_INI)
+
+    def test_plan_nofilter_agent_absent(self):
+        assert "plan-nofilter" not in self.cfg.get("agent", {})
+
+    def test_nofilter_command_absent(self):
+        assert "nofilter" not in self.cfg["command"]
+
+    def test_review_command_present(self):
+        assert "review" in self.cfg["command"]
+
+
 _NO_OUTPUT_TOKENS_INI = """
 [DEFAULT]
 host        = 127.0.0.1

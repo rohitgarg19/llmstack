@@ -285,7 +285,11 @@ def build_config(
         out["small_model"] = small_model
     if agents:
         out["agent"] = {k: agents[k] for k in ("build", "plan", "plan-nofilter") if k in agents}
-    out["command"] = COMMANDS
+    out["command"] = {
+        name: spec
+        for name, spec in COMMANDS.items()
+        if not spec.get("agent") or spec.get("agent") in agents
+    }
     return out
 
 

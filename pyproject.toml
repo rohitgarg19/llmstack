@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-llmstack"
-version = "0.10.0"
+version = "0.10.1"
 description = "Multi-tier local LLM stack: llama-swap + FastAPI auto-router + opencode wiring."
 readme = "README.md"
 requires-python = ">=3.11"
