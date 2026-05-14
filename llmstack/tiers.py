@@ -196,6 +196,7 @@ class Tier:
     # `top_k`, `min_p`, `rep_pen`); the router maps them to OpenAI-compat
     # request fields.
     sampler: dict[str, float] = field(default_factory=dict)
+    max_output_tokens: int | None = None
 
     def files(self) -> list[TierFile]:
         """Return the GGUF download targets for this tier (empty for non-gguf)."""
@@ -351,9 +352,16 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
                 file=_strip(s.get("hf_file")),
                 repo_next=_strip(s.get("hf_repo_next")) or None,
                 file_next=_strip(s.get("hf_file_next")) or None,
+                max_output_tokens=_int(s.get("max_output_tokens", "")) or None,
             )
         elif backend == BACKEND_BEDROCK:
-            tiers[sec] = Tier(**common, bedrock=_build_bedrock(s))
+            bedrock_cfg = _build_bedrock(s)
+            max_out = _int(s.get("max_output_tokens", "")) or bedrock_cfg.max_output_tokens
+            tiers[sec] = Tier(
+                **common,
+                bedrock=bedrock_cfg,
+                max_output_tokens=max_out,
+            )
     return tiers
 
 

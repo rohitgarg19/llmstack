@@ -192,10 +192,20 @@ def build_config(
         default=8192,
     ) or 8192
 
+    fast_output = next(
+        (
+            _int(cfg[s].get("max_output_tokens", ""), 0)
+            for s in tier_sections
+            if (cfg[s].get("role") or "").strip() == "fast"
+        ),
+        0,
+    )
+    auto_output = fast_output or 16384
+
     models: dict[str, dict] = {
         "auto": {
             "name":      "Auto (router selects: fast / agent / ultra)",
-            "limit":     {"context": auto_ctx, "output": 16384},
+            "limit":     {"context": auto_ctx, "output": auto_output},
             "tool_call": True,
             "cost":      ZERO_COST,
         }
@@ -210,9 +220,12 @@ def build_config(
         ctx  = _int(s.get("ctx_size", ""), 8192)
         desc = (s.get("description") or sec).strip()
 
+        _default_output = 32768 if role in ("agent", "plan-uncensored") else 8192
+        output = _int(s.get("max_output_tokens", ""), 0) or _default_output
+
         model_entry: dict = {
             "name":      desc,
-            "limit":     {"context": ctx, "output": 32768 if role == "agent" else 8192},
+            "limit":     {"context": ctx, "output": output},
             "tool_call": True,
             "cost":      ZERO_COST,
         }

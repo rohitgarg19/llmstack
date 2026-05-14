@@ -18,6 +18,7 @@ role     = fast
 hf_repo  = bartowski/Qwen2.5-Coder-3B-Instruct-GGUF
 hf_file  = Qwen2.5-Coder-3B-Instruct-Q5_K_M.gguf
 ctx_size = 131072
+max_output_tokens = 8192
 sampler  = temp=0.2
 description = Qwen2.5-Coder 3B fast
 
@@ -27,6 +28,7 @@ role     = agent
 hf_repo  = unsloth/Qwen3-Coder-Next-GGUF
 hf_file  = Qwen3-Coder-Next-Q4_K_M.gguf
 ctx_size = 64000
+max_output_tokens = 32768
 sampler  = temp=0.5
 description = Qwen3-Coder-Next agent
 
@@ -36,6 +38,7 @@ role     = plan
 hf_repo  = Jackrong/Qwopus-GLM-18B-Merged-GGUF
 hf_file  = Qwopus-GLM-18B-Healed-Q4_K_M.gguf
 ctx_size = 65536
+max_output_tokens = 16384
 sampler  = temp=0.7
 description = Qwopus plan
 
@@ -45,6 +48,7 @@ role     = plan-uncensored
 hf_repo  = mradermacher/Mistral-Small-3.2-24B-Instruct-GGUF
 hf_file  = Mistral-Small.gguf
 ctx_size = 131072
+max_output_tokens = 16384
 sampler  = temp=0.85
 description = Mistral uncensored
 
@@ -66,6 +70,7 @@ backend      = bedrock
 aws_model_id = eu.anthropic.claude-haiku-4-5-20251001-v1:0
 aws_region   = eu-west-3
 ctx_size     = 200000
+max_output_tokens = 4096
 description  = Haiku fast
 
 [code-smart]
@@ -75,6 +80,7 @@ backend      = bedrock
 aws_model_id = eu.anthropic.claude-sonnet-4-6
 aws_region   = eu-west-3
 ctx_size     = 200000
+max_output_tokens = 16384
 description  = Sonnet agent
 
 [ROUTING]
@@ -104,6 +110,17 @@ class TestBuildConfigGguf:
     def test_auto_ctx_equals_fast_ctx(self):
         models = self.cfg["provider"]["llama.cpp"]["models"]
         assert models["auto"]["limit"]["context"] == 131072
+
+    def test_auto_output_equals_fast_output(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["auto"]["limit"]["output"] == 8192
+
+    def test_tier_output_limits_from_ini(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["code-fast"]["limit"]["output"] == 8192
+        assert models["code-smart"]["limit"]["output"] == 32768
+        assert models["plan"]["limit"]["output"] == 16384
+        assert models["plan-uncensored"]["limit"]["output"] == 16384
 
     def test_small_model_wired_to_fast(self):
         assert self.cfg["small_model"] == "llama.cpp/code-fast"
@@ -144,6 +161,15 @@ class TestBuildConfigBedrock:
         models = self.cfg["provider"]["llama.cpp"]["models"]
         assert models["auto"]["limit"]["context"] == 200000
 
+    def test_auto_output_equals_fast_output(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["auto"]["limit"]["output"] == 4096
+
+    def test_tier_output_limits_from_ini(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["code-fast"]["limit"]["output"] == 4096
+        assert models["code-smart"]["limit"]["output"] == 16384
+
     def test_small_model_wired_to_fast(self):
         assert self.cfg["small_model"] == "llama.cpp/code-fast"
 
@@ -161,6 +187,70 @@ class TestBuildConfigRemote:
         cfg = build_config(ini_text=GGUF_INI, remote=None)
         url = cfg["provider"]["llama.cpp"]["options"]["baseURL"]
         assert "127.0.0.1:10101" in url
+
+
+_NO_OUTPUT_TOKENS_INI = """
+[DEFAULT]
+host        = 127.0.0.1
+router_port = 10101
+
+[code-fast]
+tier     = code
+role     = fast
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 32768
+description = fast tier
+
+[code-smart]
+tier     = code
+role     = agent
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 65536
+description = agent tier
+
+[plan]
+tier     = chat
+role     = plan
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 65536
+description = plan tier
+
+[plan-uncensored]
+tier     = chat
+role     = plan-uncensored
+hf_repo  = owner/repo
+hf_file  = model.gguf
+ctx_size = 65536
+description = uncensored tier
+"""
+
+
+class TestOutputLimitFallbacks:
+    def setup_method(self):
+        self.cfg = build_config(ini_text=_NO_OUTPUT_TOKENS_INI)
+
+    def test_auto_output_falls_back_to_16384(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["auto"]["limit"]["output"] == 16384
+
+    def test_agent_output_falls_back_to_32768(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["code-smart"]["limit"]["output"] == 32768
+
+    def test_fast_output_falls_back_to_8192(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["code-fast"]["limit"]["output"] == 8192
+
+    def test_plan_uncensored_output_falls_back_to_32768(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["plan-uncensored"]["limit"]["output"] == 32768
+
+    def test_plan_output_falls_back_to_8192(self):
+        models = self.cfg["provider"]["llama.cpp"]["models"]
+        assert models["plan"]["limit"]["output"] == 8192
 
 
 class TestLlamaSwapRender:
