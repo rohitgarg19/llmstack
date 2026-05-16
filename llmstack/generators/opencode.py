@@ -26,9 +26,9 @@ What is **deliberately NOT wired**:
     tier's ``sampler = ...`` into the llama-server startup command line
     (``--temp``/``--top-p``/...). llama-server applies them as defaults
     for every request.
-  * Bedrock tiers -- :func:`llmstack.app._inject_sampler` adds the
-    tier's sampler keys to each outbound request body (Bedrock has no
-    server-side defaults mechanism). Bedrock models that reject sampler
+  * litellm tiers -- :func:`llmstack.app._inject_sampler` adds the
+    tier's sampler keys to each outbound request body (litellm has no
+    server-side defaults mechanism). litellm models that reject sampler
     params (e.g. Claude Opus 4.7) declare an empty ``sampler =`` and
     the router passes requests through untouched.
 
@@ -47,10 +47,11 @@ import re
 import sys
 from pathlib import Path
 
-from llmstack.paths import AGENTS_TEMPLATE, models_ini_path, remote_url
+from llmstack.paths import AGENTS_TEMPLATE, models_ini_path, remote_url, resolve
 
-PROVIDER_KEY = "llama.cpp"
+PROVIDER_KEY = "llama-swap"
 API_KEY      = "sk-no-key-required"
+LITELLM_PROXY_PORT = 10103
 
 ROLE_MAP: dict[str, tuple[str, str | None]] = {
     "fast":            ("small_model", None),
@@ -81,7 +82,7 @@ USERNAME     = os.getenv("OPENCODE_USERNAME") or None
 # Keep model picker scoped to the local stack even if hosted-API env vars leak in.
 _REMOTE_PROVIDERS = (
     "anthropic,openai,google,openrouter,xai,groq,deepseek,"
-    "mistral,cerebras,azure,perplexity,vercel,morph,bedrock"
+    "mistral,cerebras,azure,perplexity,vercel,morph"
 )
 DISABLED_PROVIDERS = [
     p.strip() for p in
@@ -98,6 +99,66 @@ def _instructions_paths() -> list[str]:
     """
     raw = os.getenv("OPENCODE_INSTRUCTIONS", str(AGENTS_TEMPLATE))
     return [p for p in raw.split(":") if p]
+
+
+def _mcp_block(remote: str | None) -> dict[str, dict]:
+    """Mirror ``mcp_servers`` from ``litellm_config.yaml`` into opencode.
+
+    Reads the per-project litellm yaml, extracts each entry under
+    ``mcp_servers``, and converts it to an opencode ``mcp.*`` entry
+    pointed at the litellm proxy's per-server endpoint
+    ``http://<host>:<port>/mcp/<name>``. The proxy fan-outs to the
+    actual MCP server and applies its own auth / permission layer --
+    so opencode never holds the raw MCP credentials, just a route
+    through the gateway.
+
+    External (thin-client) installs point at ``<remote>/mcp/<name>``
+    so the remote llmstack's litellm proxy answers. Local installs
+    use ``http://127.0.0.1:LITELLM_PROXY_PORT``.
+
+    Empty / missing yaml, missing ``mcp_servers`` key, or PyYAML
+    not importable all yield an empty dict (no ``mcp`` key in
+    opencode.json).
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        path = resolve().litellm_config
+    except Exception:
+        return {}
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return {}
+    servers = data.get("mcp_servers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        return {}
+
+    if remote:
+        base = f"{remote.rstrip('/')}/mcp"
+    else:
+        base = f"http://127.0.0.1:{LITELLM_PROXY_PORT}/mcp"
+
+    out: dict[str, dict] = {}
+    for name, entry in servers.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        # Honour stdio MCP servers transparently: opencode supports
+        # type=local for those, but the litellm proxy is already
+        # hosting the stdio server -- so we still expose a remote
+        # tunnel into the proxy. Users who want opencode to spawn the
+        # process directly can override the entry in their personal
+        # opencode.json (post-install) without affecting the gateway.
+        out[name] = {
+            "type": "remote",
+            "url": f"{base}/{name}",
+            "enabled": True,
+        }
+    return out
 
 
 ZERO_COST = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
@@ -290,6 +351,9 @@ def build_config(
         for name, spec in COMMANDS.items()
         if not spec.get("agent") or spec.get("agent") in agents
     }
+    mcp = _mcp_block(rurl)
+    if mcp:
+        out["mcp"] = mcp
     return out
 
 

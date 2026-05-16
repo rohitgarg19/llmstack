@@ -7,20 +7,16 @@ This is the **data layer** for the stack -- the single source of truth for
                ``hf_repo`` + ``hf_file`` (and optional ``_next`` upgrade
                target). This is the only backend the original stack
                supported.
-  ``bedrock``  hosted AWS Bedrock model, driven by ``aws_model_id``
-               (and per-tier ``aws_region`` / ``aws_profile`` /
-               ``aws_endpoint_url``). Credentials live in the standard
-               AWS config (``~/.aws/config`` and ``~/.aws/credentials``),
-               selected by ``aws_profile`` -- never in ``models.ini``,
-               which is meant to be committable. Anything boto3 can do
-               via a named profile (long-term keys, SSO, role chaining
-               via ``role_arn`` + ``source_profile`` in
-               ``~/.aws/config``, MFA, IMDS) is supported transparently.
+  ``litellm``  remote LLM via litellm library, driven by ``model``
+               (e.g. ``anthropic/claude-sonnet-4-20250514``). Credentials
+               are resolved from environment variables (``ANTHROPIC_API_KEY``,
+               ``OPENAI_API_KEY``, etc.) or litellm's config file. Never
+               stored in ``models.ini``, which is meant to be committable.
 
 Used by:
 
   - :mod:`llmstack.app`                   request dispatch (gguf -> proxy
-                                          to llama-swap; bedrock -> AWS).
+                                          to llama-swap; litellm -> remote).
   - :mod:`llmstack.check_models`          snapshot table + HF metadata lookup
   - :mod:`llmstack.download.ggufs`        drives the GGUF downloader
   - :mod:`llmstack.generators.llama_swap` only emits gguf tiers
@@ -50,8 +46,15 @@ DIGITS = re.compile(r"\d+")
 SAMPLER_KV = re.compile(r"(\w+)\s*=\s*([0-9.]+)")
 
 BACKEND_GGUF = "gguf"
-BACKEND_BEDROCK = "bedrock"
-KNOWN_BACKENDS = {BACKEND_GGUF, BACKEND_BEDROCK}
+BACKEND_LITELLM = "litellm"
+KNOWN_BACKENDS = {BACKEND_GGUF, BACKEND_LITELLM}
+
+ROUTING_SECTION = "ROUTING"
+ROUTING_DEFAULTS = {
+    "high_fidelity_ceiling": 12000,
+    "mid_fidelity_ceiling":  32000,
+    "multi_turn":            10,
+}
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -68,7 +71,7 @@ def parse_sampler(raw: str) -> dict[str, float]:
     request-body field names that backends understand. An empty / missing
     line yields ``{}`` -- the canonical "no sampler tuning" signal that
     the router uses to pass requests through untouched (which is what
-    Bedrock Claude Opus 4.7 et al. require).
+    some litellm-backed models may require).
     """
     return {k: float(v) for k, v in SAMPLER_KV.findall(raw or "")}
 
@@ -94,6 +97,35 @@ def _opt(value: str | None) -> str | None:
 
 
 @dataclass(frozen=True)
+class RoutingConfig:
+    """Auto-router thresholds parsed from ``[ROUTING]`` in models.ini.
+
+    These are the cost/speed/quality knobs that decide which tier
+    handles a ``model="auto"`` request. Defaults match historical
+    behaviour so an absent or partial ``[ROUTING]`` section is harmless.
+    """
+
+    high_fidelity_ceiling: int = ROUTING_DEFAULTS["high_fidelity_ceiling"]
+    mid_fidelity_ceiling: int = ROUTING_DEFAULTS["mid_fidelity_ceiling"]
+    multi_turn: int = ROUTING_DEFAULTS["multi_turn"]
+
+
+@dataclass(frozen=True)
+class RouterEndpoint:
+    """``host`` + ``router_port`` parsed from ``[DEFAULT]`` in models.ini.
+
+    The router (this process) binds to these and downstream consumers
+    (opencode, the activate hook's ``OPENAI_BASE_URL``, ...) point at
+    them. Defaults match :data:`llmstack.paths.ROUTER_HOST` /
+    :data:`llmstack.paths.ROUTER_PORT` so an absent file still yields
+    a working local config.
+    """
+
+    host: str = "127.0.0.1"
+    router_port: int = 10101
+
+
+@dataclass(frozen=True)
 class TierFile:
     """One downloadable GGUF for a tier (current or upgrade target)."""
 
@@ -110,55 +142,44 @@ class TierFile:
 
 
 @dataclass(frozen=True)
-class BedrockConfig:
-    """AWS Bedrock backend config for a single tier.
+class LiteLLMConfig:
+    """LiteLLM backend config for a single tier.
 
-    Identity-only -- never holds credentials. The tier names a profile
-    via :attr:`profile`; everything boto3 needs (long-term access keys,
-    SSO, role chaining via ``role_arn`` + ``source_profile`` in
-    ``~/.aws/config``, MFA, IMDS) is resolved by the standard AWS
-    config files, not by ``models.ini``. When :attr:`profile` is
-    ``None``, boto3's default credential chain applies (env vars,
-    default profile, instance role, ...).
+    Identity-only -- never holds credentials. The model string (e.g.
+    ``anthropic/claude-sonnet-4-20250514``) is passed directly to litellm,
+    which resolves credentials from environment variables
+    (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, etc.) or litellm's config
+    file. Credentials are never stored in ``models.ini``, which is meant
+    to be committable.
 
     Upgrade pre-staging (mirrors gguf ``hf_file_next``)
-    ----------------------------------------------------
-    ``model_id_next`` (and optional ``region_next``) is the queued
-    upgrade target -- e.g. flip ``code-smart`` from Sonnet 4.5 to a
-    newer Sonnet revision once it ships in your region. The router
-    reads it only when ``--next`` is in effect (env var
-    ``LLMSTACK_USE_NEXT=1``); the rest of the time the active
-    ``model_id`` / ``region`` are used. Permanent promotion is the same
-    as gguf: edit ``aws_model_id`` in models.ini and re-run
+    ------------------------------------------------
+    ``model_next`` is the queued upgrade target -- e.g. flip ``code-smart``
+    from Sonnet 4.5 to a newer Sonnet revision. The router reads it only
+    when ``--next`` is in effect (env var ``LLMSTACK_USE_NEXT=1``); the
+    rest of the time the active ``model`` is used. Permanent promotion is
+    the same as gguf: edit ``model`` in models.ini and re-run
     ``llmstack install``.
     """
 
-    model_id: str
-    region: str | None = None
-    profile: str | None = None
-    endpoint_url: str | None = None
-    model_id_next: str | None = None
-    region_next: str | None = None
+    model: str
+    model_next: str | None = None
     max_output_tokens: int | None = None
 
     @property
     def has_next(self) -> bool:
-        return bool(self.model_id_next)
+        return bool(self.model_next)
 
-    def resolved(self, use_next: bool = False) -> BedrockConfig:
-        """Return a copy with model_id/region swapped to the queued upgrade.
+    def resolved(self, use_next: bool = False) -> LiteLLMConfig:
+        """Return a copy with model swapped to the queued upgrade.
 
         No-op when ``use_next`` is false or the tier has no queued
-        upgrade; this is what the dispatcher actually hands to boto3.
+        upgrade; this is what the dispatcher actually hands to litellm.
         """
-        if not use_next or not self.model_id_next:
+        if not use_next or not self.model_next:
             return self
         from dataclasses import replace
-        return replace(
-            self,
-            model_id=self.model_id_next,
-            region=self.region_next or self.region,
-        )
+        return replace(self, model=self.model_next)
 
 
 @dataclass(frozen=True)
@@ -166,12 +187,12 @@ class Tier:
     """A single tier in models.ini.
 
     ``backend`` discriminates between local GGUF tiers (the historical
-    default) and hosted AWS Bedrock tiers. Only one set of fields is
+    default) and remote litellm-backed tiers. Only one set of fields is
     populated at a time:
 
     - ``backend == "gguf"``     -> ``repo`` + ``file`` (and optional
                                    ``repo_next`` + ``file_next``).
-    - ``backend == "bedrock"``  -> ``bedrock`` is non-None.
+    - ``backend == "litellm"``  -> ``litellm`` is non-None.
     """
 
     name: str
@@ -183,18 +204,8 @@ class Tier:
     file: str = ""
     repo_next: str | None = None
     file_next: str | None = None
-    bedrock: BedrockConfig | None = None
+    litellm: LiteLLMConfig | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
-    # Per-tier sampling defaults (parsed from `sampler = ...` in models.ini).
-    # The router injects these into outbound request bodies so that:
-    #   1. opencode.json stays sampler-free (clients pick a model and let
-    #      the stack decide how to sample it).
-    #   2. Bedrock-hosted tiers whose backing model rejects sampler params
-    #      (e.g. Claude Opus 4.7) can simply omit `sampler =` and the
-    #      router will pass requests through untouched.
-    # Keys are the short names as written in models.ini (`temp`, `top_p`,
-    # `top_k`, `min_p`, `rep_pen`); the router maps them to OpenAI-compat
-    # request fields.
     sampler: dict[str, float] = field(default_factory=dict)
     max_output_tokens: int | None = None
 
@@ -215,22 +226,22 @@ class Tier:
         return self.backend == BACKEND_GGUF
 
     @property
-    def is_bedrock(self) -> bool:
-        return self.backend == BACKEND_BEDROCK
+    def is_litellm(self) -> bool:
+        return self.backend == BACKEND_LITELLM
 
     @property
     def has_next(self) -> bool:
         """Does this tier declare a queued upgrade target?
 
-        Backend-aware: gguf checks ``hf_file_next``, bedrock checks
-        ``aws_model_id_next``. Used by ``start --next`` to decide
-        whether the channel switch has anything to do, and by
-        ``check`` to print an extra row.
+        Backend-aware: gguf checks ``hf_file_next``, litellm checks
+        ``model_next``. Used by ``install --next`` to decide whether
+        the channel switch has anything to do, and by ``check`` to
+        print an extra row.
         """
         if self.is_gguf:
             return bool(self.file_next)
-        if self.is_bedrock:
-            return bool(self.bedrock and self.bedrock.has_next)
+        if self.is_litellm:
+            return bool(self.litellm and self.litellm.has_next)
         return False
 
 
@@ -244,63 +255,23 @@ def _detect_backend(section) -> str:
                 f"(supported: {', '.join(sorted(KNOWN_BACKENDS))})"
             )
         return explicit
-    if _strip(section.get("aws_model_id")):
-        return BACKEND_BEDROCK
+    if _strip(section.get("model")):
+        return BACKEND_LITELLM
     if _strip(section.get("hf_repo")) and _strip(section.get("hf_file")):
         return BACKEND_GGUF
     return ""
 
 
-BANNED_BEDROCK_KEYS = {
-    # Hard-secret material -- belongs in ~/.aws/credentials, never here.
-    "aws_access_key_id":     "long-term access key",
-    "aws_secret_access_key": "long-term secret key",
-    "aws_session_token":     "STS session token",
-    # Things boto3 already handles natively in ~/.aws/config under a
-    # named profile -- pointing aws_profile at that profile is the
-    # correct way to opt into them, not duplicating them here.
-    "aws_role_arn":          "role to assume",
-    "aws_role_session_name": "role-session name",
-}
-
-
-def _check_no_secrets(section) -> None:
-    """Reject credentials/role-chaining keys in models.ini."""
-    found = sorted(k for k in BANNED_BEDROCK_KEYS if section.get(k))
-    if not found:
-        return
-    profile_hint = _strip(section.get("aws_profile")) or "<my-profile>"
-    bullets = "\n".join(
-        f"      - {k}  ({BANNED_BEDROCK_KEYS[k]})" for k in found
-    )
-    raise SystemExit(
-        f"[!] models.ini [{section.name}] contains AWS credential keys -- "
-        "these must NOT live in models.ini (it is meant to be committable):\n"
-        f"{bullets}\n"
-        "    Move them into a named profile in ~/.aws/credentials and/or\n"
-        "    ~/.aws/config, then reference it from this section:\n\n"
-        f"        aws_profile = {profile_hint}\n\n"
-        "    boto3 picks up the profile's keys, role_arn + source_profile,\n"
-        "    SSO, MFA, etc. transparently. See `aws configure --profile\n"
-        f"    {profile_hint}` and the AWS shared-config docs."
-    )
-
-
-def _build_bedrock(section) -> BedrockConfig:
-    _check_no_secrets(section)
-    model_id = _strip(section.get("aws_model_id"))
-    if not model_id:
+def _build_litellm(section) -> LiteLLMConfig:
+    model = _strip(section.get("model"))
+    if not model:
         raise SystemExit(
-            f"[!] models.ini [{section.name}] backend=bedrock but aws_model_id is missing"
+            f"[!] models.ini [{section.name}] backend=litellm but model is missing"
         )
-    return BedrockConfig(
-        model_id=model_id,
-        region=_opt(section.get("aws_region")),
-        profile=_opt(section.get("aws_profile")),
-        endpoint_url=_opt(section.get("aws_endpoint_url")),
-        model_id_next=_opt(section.get("aws_model_id_next")),
-        region_next=_opt(section.get("aws_region_next")),
-        max_output_tokens=_int(section.get("aws_max_output_tokens", "")) or None,
+    return LiteLLMConfig(
+        model=model,
+        model_next=_opt(section.get("model_next")),
+        max_output_tokens=_int(section.get("max_output_tokens", "")) or None,
     )
 
 
@@ -315,7 +286,7 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
     """Parse ``models.ini`` into a dict of tier-name -> Tier.
 
     Sections without a recognisable backend (no ``hf_repo``/``hf_file``
-    pair *and* no ``aws_model_id``) are silently skipped -- this is how
+    pair *and* no ``model``) are silently skipped -- this is how
     the ``[ROUTING]`` block stays out of the inventory.
     """
     path = ini_path or require_models_ini()
@@ -354,12 +325,12 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
                 file_next=_strip(s.get("hf_file_next")) or None,
                 max_output_tokens=_int(s.get("max_output_tokens", "")) or None,
             )
-        elif backend == BACKEND_BEDROCK:
-            bedrock_cfg = _build_bedrock(s)
-            max_out = _int(s.get("max_output_tokens", "")) or bedrock_cfg.max_output_tokens
+        elif backend == BACKEND_LITELLM:
+            litellm_cfg = _build_litellm(s)
+            max_out = _int(s.get("max_output_tokens", "")) or litellm_cfg.max_output_tokens
             tiers[sec] = Tier(
                 **common,
-                bedrock=bedrock_cfg,
+                litellm=litellm_cfg,
                 max_output_tokens=max_out,
             )
     return tiers
@@ -368,10 +339,78 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
 def iter_download_targets(ini_path: Path | None = None) -> Iterator[TierFile]:
     """Yield every :class:`TierFile` worth caching, across all tiers.
 
-    Bedrock-backed tiers contribute nothing (no GGUFs to fetch).
+    LiteLLM-backed tiers contribute nothing (no GGUFs to fetch).
     """
     for tier in load_tiers(ini_path).values():
         yield from tier.files()
+
+
+def load_routing(ini_path: Path | None = None) -> RoutingConfig:
+    """Parse ``[ROUTING]`` from models.ini into a :class:`RoutingConfig`.
+
+    Missing file, missing section, or missing/blank/non-numeric keys all
+    fall back to :data:`ROUTING_DEFAULTS`. This keeps the router functional
+    when models.ini is absent (pure pass-through proxy mode) and makes
+    partial ``[ROUTING]`` sections safe.
+    """
+    try:
+        path = ini_path or require_models_ini()
+    except SystemExit:
+        return RoutingConfig()
+
+    cfg = configparser.ConfigParser(
+        inline_comment_prefixes=(";",),
+        interpolation=None,
+    )
+    cfg.read(path)
+
+    if not cfg.has_section(ROUTING_SECTION):
+        return RoutingConfig()
+
+    section = cfg[ROUTING_SECTION]
+    values = {}
+    for key, default in ROUTING_DEFAULTS.items():
+        raw = _strip(section.get(key))
+        values[key] = _int(raw, default) if raw else default
+    return RoutingConfig(**values)
+
+
+def load_router_endpoint(ini_path: Path | None = None) -> RouterEndpoint:
+    """Parse ``host`` + ``router_port`` from ``[DEFAULT]`` in models.ini.
+
+    Missing file or missing keys fall back to the
+    :class:`RouterEndpoint` defaults so a fresh / partial ini still
+    yields a working local endpoint.
+    """
+    try:
+        path = ini_path or require_models_ini()
+    except SystemExit:
+        return RouterEndpoint()
+
+    cfg = configparser.ConfigParser(
+        inline_comment_prefixes=(";",),
+        interpolation=None,
+    )
+    cfg.read(path)
+    defaults = cfg["DEFAULT"]
+    host = _strip(defaults.get("host")) or RouterEndpoint.host
+    port_raw = _strip(defaults.get("router_port"))
+    port = _int(port_raw, RouterEndpoint.router_port) if port_raw else RouterEndpoint.router_port
+    return RouterEndpoint(host=host, router_port=port)
+
+
+def tier_name_for_role(role: str, ini_path: Path | None = None) -> str | None:
+    """Return the first tier whose ``role`` matches ``role``, or ``None``.
+
+    Used by the auto-router to resolve symbolic role names (``fast``,
+    ``agent``, ``ultra``) to concrete tier names (``code-fast``,
+    ``code-smart``, ``code-ultra``) without baking either into env
+    vars or source.
+    """
+    for tier in load_tiers(ini_path).values():
+        if tier.role == role:
+            return tier.name
+    return None
 
 
 def main(argv: list[str]) -> int:
@@ -388,15 +427,12 @@ def main(argv: list[str]) -> int:
             print(f"  current : {tier.repo} / {tier.file}")
             if tier.file_next:
                 print(f"  next    : {tier.repo_next or tier.repo} / {tier.file_next}")
-        elif tier.is_bedrock:
-            b = tier.bedrock
+        elif tier.is_litellm:
+            b = tier.litellm
             assert b is not None
-            scope = b.region or "(default region)"
-            print(f"  current : {b.model_id}  @  {scope}")
+            print(f"  current : {b.model}")
             if b.has_next:
-                next_scope = b.region_next or scope
-                print(f"  next    : {b.model_id_next}  @  {next_scope}")
-            print(f"  profile : {b.profile or '(default chain)'}")
+                print(f"  next    : {b.model_next}")
     return 0
 
 

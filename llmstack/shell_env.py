@@ -232,6 +232,15 @@ def spawn_subshell(channel: str) -> None:
         "LLMSTACK_CHANNEL": channel,
         "LLMSTACK_ACTIVE": "1",
         "LLMSTACK_ROOT": str(PACKAGE_DIR),
+        # CONFIG_FILE_PATH is the env var litellm reads to pick up its
+        # config without needing `--config` on the CLI -- so a user who
+        # types `litellm` inside this shell starts pointed at the
+        # project's litellm_config.yaml automatically.
+        "CONFIG_FILE_PATH": str(paths.litellm_config),
+        # LITELLM_MASTER_KEY is required by the litellm proxy when
+        # api_key auth is enabled; set a fixed value so the router and
+        # any in-shell litellm calls agree on the key without extra config.
+        "LITELLM_MASTER_KEY": "llmstack",
     })
     if rurl:
         env["LLMSTACK_REMOTE_URL"] = rurl
@@ -264,7 +273,7 @@ _ZSH_HOOK = r"""# --- llmstack auto-activation hook (zsh) ----------------------
 #   - `llmstack`   (always required -- blocker)
 #   - `llama-swap` (only for local channels: current / next -- blocker)
 #   - `llama-server` / `llama-cli` (local-only, *warning* not blocker --
-#     a Bedrock-only models.ini activates fine without llama-server;
+#     a litellm-only models.ini activates fine without llama-server;
 #     local GGUF rows would fail to start, hence the heads-up)
 # external-mode projects skip all local-tool checks because llama-swap
 # and llama-server live on the remote. Blockers print "folder detected
@@ -331,7 +340,7 @@ _llmstack_check_tools() {
     command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
     if [[ "${1:-current}" != "external" ]]; then
         _llmstack_find_swap || _llmstack_missing+=("llama-swap")
-        # llama-server is a soft requirement: bedrock-only models.ini
+        # llama-server is a soft requirement: litellm-only models.ini
         # files don't need it, so missing == warn-and-continue.
         if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
             _llmstack_warnings+=("llama-server")
@@ -342,7 +351,7 @@ _llmstack_check_tools() {
 
 _llmstack_install_hint() {
     case "$1" in
-        llmstack)     print -r -- "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" ;;
+        llmstack)     print -r -- "      llmstack       pip install -e <repo>   (or: pipx install opencode-llmstack)" ;;
         llama-swap)   print -r -- "      llama-swap     llmstack install-llama-swap" ;;
         llama-server) print -r -- "      llama-server   brew install llama.cpp  (or download from https://github.com/ggml-org/llama.cpp/releases)" ;;
     esac
@@ -369,13 +378,13 @@ _llmstack_warn_optional() {
     for t in "${_llmstack_warnings[@]}"; do
         _llmstack_install_hint "$t"
     done
-    print -r -- "    bedrock-only models.ini works fine; local GGUF rows will fail to start."
+    print -r -- "    litellm-only models.ini works fine; local GGUF rows will fail to start."
     print -r -- ""
 }
 
 _llmstack_deactivate() {
     if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH LITELLM_MASTER_KEY
         if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
             PROMPT="$_LLMSTACK_PS1_BACKUP"
             unset _LLMSTACK_PS1_BACKUP
@@ -414,7 +423,7 @@ _llmstack_activate() {
 
     # Tool gate -- bail before exporting anything if a *blocker* is
     # missing. Non-blocking warnings (e.g. llama-server for a
-    # bedrock-only setup) print a hint but proceed.
+    # litellm-only setup) print a hint but proceed.
     if ! _llmstack_check_tools "$_ch"; then
         _llmstack_warn_missing "$found"
         export _LLMSTACK_WARNED_FOR="$found"
@@ -428,6 +437,11 @@ _llmstack_activate() {
     export LLMSTACK_WORK_DIR="$found"
     export LLMSTACK_ACTIVE="1"
     export LLMSTACK_CHANNEL="$_ch"
+    # litellm reads CONFIG_FILE_PATH instead of requiring --config on the
+    # CLI; export it so `litellm` started from this shell finds the
+    # project's config automatically.
+    export CONFIG_FILE_PATH="$found/.llmstack/litellm_config.yaml"
+    export LITELLM_MASTER_KEY="llmstack"
     if [[ "$_ch" == "external" && -n "$_url" ]]; then
         export LLMSTACK_REMOTE_URL="$_url"
     else
@@ -468,7 +482,7 @@ _BASH_HOOK = r"""# --- llmstack auto-activation hook (bash) --------------------
 #   - `llmstack`   (always required -- blocker)
 #   - `llama-swap` (only for local channels: current / next -- blocker)
 #   - `llama-server` / `llama-cli` (local-only, *warning* not blocker --
-#     a Bedrock-only models.ini activates fine without llama-server;
+#     a litellm-only models.ini activates fine without llama-server;
 #     local GGUF rows would fail to start, hence the heads-up)
 # Blockers print a one-shot "folder detected but tool not available"
 # warning + install hints and DON'T activate (env stays clean). Warnings
@@ -533,7 +547,7 @@ _llmstack_check_tools() {
     command -v llmstack >/dev/null 2>&1 || _llmstack_missing+=("llmstack")
     if [[ "${1:-current}" != "external" ]]; then
         _llmstack_find_swap || _llmstack_missing+=("llama-swap")
-        # llama-server is a soft requirement: bedrock-only models.ini
+        # llama-server is a soft requirement: litellm-only models.ini
         # files don't need it, so missing == warn-and-continue.
         if ! command -v llama-server >/dev/null 2>&1 && ! command -v llama-cli >/dev/null 2>&1; then
             _llmstack_warnings+=("llama-server")
@@ -544,7 +558,7 @@ _llmstack_check_tools() {
 
 _llmstack_install_hint() {
     case "$1" in
-        llmstack)     printf '%s\n' "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" ;;
+        llmstack)     printf '%s\n' "      llmstack       pip install -e <repo>   (or: pipx install opencode-llmstack)" ;;
         llama-swap)   printf '%s\n' "      llama-swap     llmstack install-llama-swap" ;;
         llama-server) printf '%s\n' "      llama-server   brew install llama.cpp  (or download from https://github.com/ggml-org/llama.cpp/releases)" ;;
     esac
@@ -569,12 +583,12 @@ _llmstack_warn_optional() {
     for t in "${_llmstack_warnings[@]}"; do
         _llmstack_install_hint "$t"
     done
-    printf '    bedrock-only models.ini works fine; local GGUF rows will fail to start.\n\n'
+    printf '    litellm-only models.ini works fine; local GGUF rows will fail to start.\n\n'
 }
 
 _llmstack_deactivate() {
     if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH LITELLM_MASTER_KEY
         if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
             PS1="$_LLMSTACK_PS1_BACKUP"
             unset _LLMSTACK_PS1_BACKUP
@@ -608,7 +622,7 @@ _llmstack_activate() {
     : "${_ch:=current}"
 
     # Blockers only -- non-blocking warnings (e.g. llama-server for a
-    # bedrock-only setup) print a hint but don't skip activation.
+    # litellm-only setup) print a hint but don't skip activation.
     if ! _llmstack_check_tools "$_ch"; then
         _llmstack_warn_missing "$found"
         export _LLMSTACK_WARNED_FOR="$found"
@@ -622,6 +636,11 @@ _llmstack_activate() {
     export LLMSTACK_WORK_DIR="$found"
     export LLMSTACK_ACTIVE="1"
     export LLMSTACK_CHANNEL="$_ch"
+    # litellm picks up CONFIG_FILE_PATH instead of needing --config; this
+    # makes a bare `litellm` invocation in this shell start with the
+    # project's config.
+    export CONFIG_FILE_PATH="$found/.llmstack/litellm_config.yaml"
+    export LITELLM_MASTER_KEY="llmstack"
     if [[ "$_ch" == "external" && -n "$_url" ]]; then
         export LLMSTACK_REMOTE_URL="$_url"
     else
@@ -668,7 +687,7 @@ _POWERSHELL_HOOK = r"""# --- llmstack auto-activation hook (PowerShell) --------
 #   - llmstack   (always required -- blocker)
 #   - llama-swap (only for local channels: current / next -- blocker)
 #   - llama-server / llama-cli (local-only, *warning* not blocker --
-#     a Bedrock-only models.ini activates fine without llama-server;
+#     a litellm-only models.ini activates fine without llama-server;
 #     local GGUF rows would fail to start, hence the heads-up)
 # Blockers print a one-shot warning + install hints and DON'T activate.
 # Warnings print a hint and activate anyway. The _LLMSTACK_WARNED_FOR
@@ -757,20 +776,20 @@ function global:_LlmstackCheckTools {
     if (-not (Get-Command llmstack -ErrorAction SilentlyContinue)) { $missing += "llmstack" }
     if ($Channel -ne "external") {
         if (-not (_LlmstackFindSwap)) { $missing += "llama-swap" }
-        # llama-server is a soft requirement: bedrock-only models.ini
+        # llama-server is a soft requirement: litellm-only models.ini
         # files don't need it, so missing == warn-and-continue.
         if (-not (Get-Command llama-server -ErrorAction SilentlyContinue) -and `
             -not (Get-Command llama-cli    -ErrorAction SilentlyContinue)) {
             $warnings += "llama-server"
         }
     }
-    return @{ missing = ,$missing; warnings = ,$warnings }
+    return @{ missing = $missing; warnings = $warnings }
 }
 
 function global:_LlmstackInstallHint {
     param([string]$Tool)
     switch ($Tool) {
-        "llmstack"     { "      llmstack       pip install -e <repo>   (or: pipx install llmstack)" }
+        "llmstack"     { "      llmstack       pip install -e <repo>   (or: pipx install opencode-llmstack)" }
         "llama-swap"   { "      llama-swap     llmstack install-llama-swap" }
         "llama-server" { "      llama-server   download from https://github.com/ggml-org/llama.cpp/releases" }
     }
@@ -788,7 +807,7 @@ function global:_LlmstackWarnMissing {
 }
 
 function global:_LlmstackWarnOptional {
-    # Non-blocking: tool isn't on PATH but a bedrock-only models.ini
+    # Non-blocking: tool isn't on PATH but a litellm-only models.ini
     # would still work. One-shot per activation thanks to the
     # LLMSTACK_WORK_DIR idempotency guard.
     param([string]$Found, [string[]]$Warnings)
@@ -797,7 +816,7 @@ function global:_LlmstackWarnOptional {
     Write-Host -NoNewline "${esc}[38;5;220m[llmstack]${esc}[0m "
     Write-Host "${Found}: activating without optional local tool(s):"
     foreach ($t in $Warnings) { Write-Host (_LlmstackInstallHint $t) }
-    Write-Host "    bedrock-only models.ini works fine; local GGUF rows will fail to start."
+    Write-Host "    litellm-only models.ini works fine; local GGUF rows will fail to start."
     Write-Host ""
 }
 
@@ -808,6 +827,8 @@ function global:_LlmstackDeactivate {
         Remove-Item Env:LLMSTACK_ACTIVE     -ErrorAction SilentlyContinue
         Remove-Item Env:LLMSTACK_CHANNEL    -ErrorAction SilentlyContinue
         Remove-Item Env:LLMSTACK_REMOTE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:CONFIG_FILE_PATH    -ErrorAction SilentlyContinue
+        Remove-Item Env:LITELLM_MASTER_KEY  -ErrorAction SilentlyContinue
         $global:_LLMSTACK_PROMPT_ON = $false
     }
     Remove-Item Env:_LLMSTACK_WARNED_FOR -ErrorAction SilentlyContinue
@@ -843,6 +864,11 @@ function global:_LlmstackActivate {
     $env:LLMSTACK_WORK_DIR = $found
     $env:LLMSTACK_ACTIVE   = "1"
     $env:LLMSTACK_CHANNEL  = $channel
+    # litellm reads CONFIG_FILE_PATH instead of needing --config; this
+    # makes a bare `litellm` invocation in this shell start with the
+    # project's config.
+    $env:CONFIG_FILE_PATH  = Join-Path $found ".llmstack/litellm_config.yaml"
+    $env:LITELLM_MASTER_KEY = "llmstack"
     if ($channel -eq "external" -and $marker.url) {
         $env:LLMSTACK_REMOTE_URL = $marker.url
     } else {
@@ -899,10 +925,10 @@ def activate_hook(shell: str) -> str:
 # Used by ``llmstack reload`` (and pointed at by ``start`` when it
 # detects a channel switch inside an already-active shell). The activate
 # hook normally re-evaluates env + PROMPT on every chpwd / prompt cycle,
-# but a mid-shell `start --next` doesn't trigger that, so the prompt
-# would otherwise stay on the old channel until the next cd. This
-# function emits shell commands the user pipes through ``eval`` to apply
-# the channel switch in-place, no nested subshell.
+# but a mid-shell ``install --next && restart`` doesn't trigger that, so
+# the prompt would otherwise stay on the old channel until the next cd.
+# This function emits shell commands the user pipes through ``eval`` to
+# apply the channel switch in-place, no nested subshell.
 #
 # We mirror the activate hook's PS1 format so the prompt looks identical
 # to a fresh chpwd-driven re-render. ``_LLMSTACK_PS1_BACKUP`` is set by

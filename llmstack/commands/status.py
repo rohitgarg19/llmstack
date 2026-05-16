@@ -191,7 +191,8 @@ def run(args: list[str]) -> int:
 
     # Channel decision is pinned at install time; status just reads it.
     # active-channel (set by `start`) takes precedence over default-channel
-    # (set by `install`) so a `start --next` run is reflected immediately.
+    # (set by `install`) so a fresh `restart` after `install --next` is
+    # reflected immediately.
     default = read_marker(paths.default_marker)
     active = read_marker(paths.active_marker)
     persisted = active or default
@@ -210,7 +211,7 @@ def run(args: list[str]) -> int:
         channel = "current (or stopped)"
 
     tiers = load_tiers()
-    has_gguf = any(t.is_gguf for t in tiers.values())
+    has_litellm = any(t.is_litellm for t in tiers.values())
 
     print(f"stack status (channel: {channel}):")
     print(f"  work dir      {paths.work_dir}")
@@ -218,8 +219,9 @@ def run(args: list[str]) -> int:
     # 200s on a live router. llama-swap is a separate binary with its
     # own /health endpoint -- leave that one alone.
     _check_local("router", f"http://127.0.0.1:{ROUTER_PORT}/v1/models")
-    if has_gguf:
-        _check_local("llama-swap", f"http://127.0.0.1:{SWAP_PORT}/health")
+    _check_local("llama-swap", f"http://127.0.0.1:{SWAP_PORT}/health")
+    if has_litellm:
+        _check_local("litellm", "http://127.0.0.1:10103/health/liveliness")
 
     print()
     if paths.opencode_json.is_file():
@@ -234,29 +236,17 @@ def run(args: list[str]) -> int:
         chan = os.environ.get("LLMSTACK_CHANNEL", "?")
         print(f"  in-shell      OPENCODE_CONFIG={cfg}, LLMSTACK_CHANNEL={chan}")
 
-    if has_gguf:
-        _list_models(f"http://127.0.0.1:{ROUTER_PORT}")
+    _list_models(f"http://127.0.0.1:{ROUTER_PORT}")
+
+    print()
+    print("loaded llama-server processes:")
+    pids = pgrep(r"llama-server.*--alias")
+    if pids:
+        _print_process_table(pids)
     else:
-        print()
-        print("current models in /v1/models:")
-        try:
-            with urllib.request.urlopen(f"{f'http://127.0.0.1:{ROUTER_PORT}'}/v1/models", timeout=5) as resp:
-                data = json.load(resp)
-            for m in data.get("data", []):
-                print(f"  - {m.get('id')}")
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError, json.JSONDecodeError):
-            print(f"  (no response @ http://127.0.0.1:{ROUTER_PORT}/v1/models)")
+        print("  (none loaded)")
 
-    if has_gguf:
-        print()
-        print("loaded llama-server processes:")
-        pids = pgrep(r"llama-server.*--alias")
-        if pids:
-            _print_process_table(pids)
-        else:
-            print("  (none loaded)")
-
-    if channel.split()[0] == "next" and has_gguf and paths.llama_swap_yaml.is_file():
+    if channel.split()[0] == "next" and paths.llama_swap_yaml.is_file():
         print()
         print(f"next-channel swaps (from {paths.llama_swap_yaml.name}):")
         try:

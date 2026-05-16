@@ -58,7 +58,7 @@ mid_fidelity_ceiling  = 32000
 multi_turn            = 10
 """
 
-BEDROCK_INI = """
+LITELLM_INI = """
 [DEFAULT]
 host        = 127.0.0.1
 router_port = 10101
@@ -66,9 +66,8 @@ router_port = 10101
 [code-fast]
 tier         = code
 role         = fast
-backend      = bedrock
-aws_model_id = eu.anthropic.claude-haiku-4-5-20251001-v1:0
-aws_region   = eu-west-3
+backend      = litellm
+model        = anthropic/claude-haiku-4-5-20251001
 ctx_size     = 200000
 max_output_tokens = 4096
 description  = Haiku fast
@@ -76,9 +75,8 @@ description  = Haiku fast
 [code-smart]
 tier         = code
 role         = agent
-backend      = bedrock
-aws_model_id = eu.anthropic.claude-sonnet-4-6
-aws_region   = eu-west-3
+backend      = litellm
+model        = anthropic/claude-sonnet-4-20250514
 ctx_size     = 200000
 max_output_tokens = 16384
 description  = Sonnet agent
@@ -153,9 +151,9 @@ class TestBuildConfigGguf:
         assert "nofilter" in self.cfg["command"]
 
 
-class TestBuildConfigBedrock:
+class TestBuildConfigLiteLLM:
     def setup_method(self):
-        self.cfg = build_config(ini_text=BEDROCK_INI)
+        self.cfg = build_config(ini_text=LITELLM_INI)
 
     def test_auto_ctx_equals_fast_ctx(self):
         models = self.cfg["provider"]["llama.cpp"]["models"]

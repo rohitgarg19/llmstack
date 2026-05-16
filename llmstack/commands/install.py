@@ -1,10 +1,11 @@
 """``llmstack install`` -- regenerate ``opencode.json`` (and AGENTS.md copy).
 
 Renders the opencode config atomically (tmp file in target dir, validate,
-``mv``), copies AGENTS.md alongside it, and pins the default channel for
-``start`` to pick up. ``llama-swap.yaml`` is *not* generated here -- it's
-a runtime-only artifact owned by ``llmstack start`` (which knows the
-chosen channel and regenerates the yaml on each launch).
+``mv``), copies AGENTS.md alongside it, pins the default channel for
+``start`` to pick up, and -- for local channels -- renders
+``llama-swap.yaml`` for that channel. ``start`` / ``restart`` consume
+the yaml as-is; channel selection (``--current`` / ``--next``) is an
+install-time decision and is not honoured by ``start``.
 
 This is also where the **channel** is decided -- everything downstream
 (``start``, ``status``, the activate hook) reads the persisted choice
@@ -14,17 +15,17 @@ channels exist:
   * ``current``   -- local stack, canonical channel (default)
   * ``next``      -- local stack, queued-upgrade channel
   * ``external``  -- thin client; no daemons launched. Opt in via
-                    ``--external [URL]`` (URL defaults to the local
-                    router, ``http://127.0.0.1:10101``, so two
-                    projects on one host can share daemons without
-                    fighting for ports). ``LLMSTACK_REMOTE_URL`` in the
-                    environment is honoured as an alternative way in.
+                     ``--external [URL]`` (URL defaults to the local
+                     router, ``http://127.0.0.1:10101``, so two
+                     projects on one host can share daemons without
+                     fighting for ports). ``LLMSTACK_REMOTE_URL`` in the
+                     environment is honoured as an alternative way in.
 
 ``--print`` writes the opencode config to stdout instead of files.
 
 When this command seeds a fresh ``models.ini`` from the bundled template
-and the ``bedrock`` extra is installed (i.e. ``import boto3`` succeeds),
-any block fenced with ``; >>> AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE >>>``
+and the ``litellm`` extra is installed (i.e. ``import litellm`` succeeds),
+any block fenced with ``; >>> AUTO-ENABLE-WHEN-LITELLM-AVAILABLE >>>``
 markers in the seeded file is uncommented in place. The auto-enable
 runs only on the *initial* seed; subsequent ``install`` runs never
 mutate the user's models.ini.
@@ -39,54 +40,61 @@ import urllib.request
 from pathlib import Path
 
 from llmstack.generators import render_to
+from llmstack.generators.litellm_config import merge as merge_litellm_config
+from llmstack.generators.llama_swap import render as render_yaml
+from llmstack.generators.llama_swap import validate as validate_yaml
 from llmstack.generators.opencode import render as render_opencode
 from llmstack.generators.opencode import validate as validate_opencode
 from llmstack.paths import (
     AGENTS_TEMPLATE,
     DEFAULT_REMOTE_URL,
     ChannelMark,
+    ensure_litellm_config,
     ensure_models_ini,
     ensure_state_dirs,
     env_remote_url,
     write_marker,
 )
 
-_BEDROCK_BEGIN = "; >>> AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE >>>"
-_BEDROCK_END   = "; <<< AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE <<<"
+_LITELLM_BEGIN = "; >>> AUTO-ENABLE-WHEN-LITELLM-AVAILABLE >>>"
+_LITELLM_END   = "; <<< AUTO-ENABLE-WHEN-LITELLM-AVAILABLE <<<"
 
 
-def _try_enable_bedrock_blocks(ini_path: Path) -> int:
-    """Activate any ``AUTO-ENABLE-WHEN-BEDROCK-AVAILABLE`` block in
-    ``ini_path`` when ``boto3`` is importable.
+def _try_enable_litellm_blocks(ini_path: Path) -> int:
+    """Activate any ``AUTO-ENABLE-WHEN-LITELLM-AVAILABLE`` block in
+    ``ini_path`` when ``litellm`` is importable.
 
     For each fenced block we drop the BEGIN / END marker lines and
     strip a single leading ``"; "`` (or ``";\\t"``) from every line in
-    between -- so a doubly-commented line like ``; ; aws_profile = ...``
-    becomes a still-commented ``; aws_profile = ...`` in the active
+    between -- so a doubly-commented line like ``; ; model = ...``
+    becomes a still-commented ``; model = ...`` in the active
     config (preserving the "uncomment to use" semantics of literal
     in-file comments). Returns the number of blocks rewritten; ``0``
-    when boto3 is missing, no markers exist, or every block is already
+    when litellm is missing, no markers exist, or every block is already
     expanded.
     """
     try:
-        import boto3  # noqa: F401  -- presence check only
+        import litellm  # noqa: F401  -- presence check only
     except ImportError:
         return 0
 
     text = ini_path.read_text()
-    if _BEDROCK_BEGIN not in text or _BEDROCK_END not in text:
+    if _LITELLM_BEGIN not in text or _LITELLM_END not in text:
         return 0
+    yaml_path, seeded = ensure_litellm_config()
+    if seeded:
+        print(f"[*] no litellm_config.yaml found -- seeded default at {yaml_path}")
 
     out: list[str] = []
     inside = False
     blocks = 0
     for line in text.splitlines(keepends=True):
         bare = line.rstrip("\r\n").rstrip()
-        if bare == _BEDROCK_BEGIN:
+        if bare == _LITELLM_BEGIN:
             inside = True
             blocks += 1
             continue
-        if bare == _BEDROCK_END:
+        if bare == _LITELLM_END:
             inside = False
             continue
         if inside:
@@ -293,14 +301,35 @@ def run(args: list[str]) -> int:
         ini_path, seeded = ensure_models_ini()
         if seeded:
             print(f"[*] no models.ini found -- seeded default at {ini_path}")
-            enabled = _try_enable_bedrock_blocks(ini_path)
+            enabled = _try_enable_litellm_blocks(ini_path)
             if enabled:
                 print(
-                    f"[*] boto3 detected -- enabled {enabled} bedrock-backed "
+                    f"[*] litellm detected -- enabled {enabled} litellm-backed "
                     f"tier block(s) in {ini_path}"
                 )
             print("    edit it to taste, then re-run `llmstack install`.")
         ini_source_label = str(ini_path)
+
+        # Reconcile litellm_config.yaml against the litellm-backed
+        # tiers. Non-destructive: existing model_list entries (which
+        # the user may have customised) are preserved verbatim;
+        # we only append stubs for tiers that don't yet have one.
+        try:
+            yaml_path, added, rewrote = merge_litellm_config()
+        except SystemExit as exc:
+            print(f"[!] litellm_config.yaml merge skipped: {exc}")
+        else:
+            if added:
+                print(
+                    f"[*] litellm_config.yaml: added {len(added)} model_list "
+                    f"entr{'y' if len(added) == 1 else 'ies'}: {', '.join(added)}"
+                )
+                if rewrote:
+                    print(
+                        "    note: PyYAML rewrite stripped any comments "
+                        "in the file. Future installs leave the file "
+                        "untouched unless new tiers appear."
+                    )
 
     paths = ensure_state_dirs()
 
@@ -346,6 +375,20 @@ def run(args: list[str]) -> int:
         write_marker(paths.default_marker, ChannelMark(channel))
         print(f"[OK] default channel: {channel}")
 
+    if remote is None:
+        # Render llama-swap.yaml for the pinned channel. ``start`` and
+        # ``restart`` consume this file as-is and never regenerate it
+        # -- channel selection is install-only.
+        print()
+        print(f"[*] generating llama-swap.yaml -> {paths.llama_swap_yaml}")
+        use_next = channel == "next"
+        render_to(
+            paths.llama_swap_yaml,
+            render=lambda p: Path(p).write_text(render_yaml(use_next=use_next)),
+            validate=validate_yaml,
+        )
+        print(f"[OK] wrote {paths.llama_swap_yaml}")
+
     print()
     print(f"[OK] opencode config generated from {ini_source_label}.")
     print()
@@ -360,6 +403,6 @@ def run(args: list[str]) -> int:
     if remote is not None:
         print("  llmstack start     # re-fetch /models.ini + drop into the client subshell")
     else:
-        print("  llmstack start     # generate llama-swap.yaml + bring up the stack")
+        print("  llmstack start     # bring up the stack (uses the llama-swap.yaml just written)")
         print("  llmstack check     # snapshot configured GGUFs + drift check")
     return 0

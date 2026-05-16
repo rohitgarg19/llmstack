@@ -3,16 +3,19 @@
 A Cursor-Auto / Claude-tier-style serving setup for local GGUF models, **role-aware**:
 *coder models for agent work, chat models for planning, with an uncensored chat option for plans that need it.*
 
-Each tier can be served by either a **local GGUF** (default) or a **hosted AWS
-Bedrock model** — useful for the top-tier weights that don't fit on a laptop.
-Both backends share the same `auto` router, so opencode/curl/Cursor never need
-to know which one a tier resolves to.
+Each tier can be served by either a **local GGUF** (default) or a **hosted
+remote model via [LiteLLM](https://docs.litellm.ai/)** — useful for the
+top-tier weights that don't fit on a laptop, and for any provider LiteLLM
+supports (Anthropic, OpenAI, Groq, Bedrock-as-a-LiteLLM-provider, etc.).
+Both backends share the same `auto` router, so opencode/curl/Cursor never
+need to know which one a tier resolves to.
 
 Built on:
 
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) — inference engine (Metal backend)
 - [`llama-swap`](https://github.com/mostlygeek/llama-swap) — multi-model process manager + OpenAI-compatible proxy
-- a tiny FastAPI **router** that adds an `auto` model with intent-based routing in front of llama-swap (and AWS Bedrock)
+- [`litellm`](https://docs.litellm.ai/) — optional remote-LLM gateway (proxy + dashboard + MCP) for hosted tiers
+- a tiny FastAPI **router** that adds an `auto` model with intent-based routing in front of llama-swap (which itself fronts the litellm proxy for remote tiers)
 
 ```
 client (opencode / curl / Cursor / etc.)
@@ -34,8 +37,8 @@ client (opencode / curl / Cursor / etc.)
 
 The whole thing is a pure Python package distributed via standard Python tooling
 (`pip install opencode-llmstack`, or `pip install -e .` from this repo). Once installed
-you get a single `llmstack` console-script. For enabling AWS bedrock, you need to install
-optional (`pip install opencode-llmstack[bedrock]`).
+you get a single `llmstack` console-script. For enabling remote LLMs via litellm, you need to install
+optional (`pip install opencode-llmstack[litellm]`).
 
 ## Why this design
 
@@ -66,7 +69,7 @@ for new / short conversations, drop down as the context grows. This
 inverts the classic "escalate when input gets big" pattern, and it
 matches how these models actually behave on this stack:
 
-- **Top-tier hosted** (Claude Opus/Sonnet on Bedrock) — fastest *and*
+- **Top-tier remote** (Claude Opus/Sonnet via litellm) — fastest *and*
   most accurate on short prompts, but per-request latency and $cost
   scale with input tokens, and long-context behaviour degrades faster
   than headline benchmarks suggest.
@@ -492,19 +495,21 @@ For changing to a *different* model entirely (different family/provider) see [UP
 
 ## Tuning the router
 
-All knobs are env vars; defaults are picked up by `llmstack start`.
+Router knobs live in `.llmstack/models.ini`; edit and re-run
+`llmstack install` to apply (`llmstack restart` to reload daemons).
 
-| Env var | Default | Meaning |
+| `models.ini` key | Default | Meaning |
 |---|---|---|
-| `LLAMA_SWAP_URL` | `http://127.0.0.1:10102` | upstream llama-swap |
-| `ROUTER_FAST_MODEL` | `code-fast` | long-context (>= mid ceiling) → here |
-| `ROUTER_AGENT_MODEL` | `code-smart` | mid-context + tools/loop floor → here |
-| `ROUTER_ULTRA_MODEL` | `code-ultra` | short-context top tier → here (gated on availability) |
-| `ROUTER_HIGH_FIDELITY_CEILING` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
-| `ROUTER_MID_FIDELITY_CEILING` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
-| `ROUTER_MULTI_TURN` | `10` | user-turn count that floors the long-context rung at `code-smart` |
-| `ROUTER_HOST` / `ROUTER_PORT` | `127.0.0.1` / `10101` | listen address |
-| `LOG_LEVEL` | `info` | router log level |
+| `[DEFAULT] host` | `127.0.0.1` | router listen host (also used as upstream `llama-swap` host) |
+| `[DEFAULT] router_port` | `10101` | router listen port |
+| `[ROUTING] high_fidelity_ceiling` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
+| `[ROUTING] mid_fidelity_ceiling` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
+| `[ROUTING] multi_turn` | `10` | user-turn count that floors the long-context rung at `code-smart`. |
+
+Auto-router rungs (`fast` / `agent` / `ultra`) are resolved by
+matching the `role` field of each `[tier]` block, so renaming a tier
+section needs no further config. The only env var the router still
+honours is `LOG_LEVEL` (default `info`).
 
 To force a request to never auto-route, set `model` to a concrete alias (`code-fast`, `code-smart`, `plan`, `plan-uncensored`, or any of their listed aliases like `agent`, `glm`, `nofilter`, …).
 
@@ -523,28 +528,41 @@ The `plan-uncensored` tier is accessible via explicit agent selection only:
 
 **OOM / unexplained slowdown** → run `top -o mem -stats pid,rsize,command` to see what's resident. The matrix should prevent two heavy models loading together; if it somehow happens, `llmstack restart`.
 
-**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`ULTRA_TRIGGERS`) or move the ladder ceilings via `ROUTER_HIGH_FIDELITY_CEILING` / `ROUTER_MID_FIDELITY_CEILING`. To force a request to never auto-route, pass an explicit `model` (e.g. `code-smart`) instead of `auto`.
+**Auto picks the wrong model** → adjust the regex in `llmstack/app.py` (`ULTRA_TRIGGERS`) or move the ladder ceilings via the `[ROUTING]` section of `models.ini` (`high_fidelity_ceiling` / `mid_fidelity_ceiling`). To force a request to never auto-route, pass an explicit `model` (e.g. `code-smart`) instead of `auto`.
 
-**Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names. (Note: this skips the bedrock dispatcher; only GGUF tiers will be reachable.)
+**Want a pure pass-through (no auto routing)** → change opencode's `baseURL` to `http://127.0.0.1:10102/v1` (llama-swap directly) and only use concrete model names. (LiteLLM tiers remain reachable via llama-swap, since the `litellm_proxy` model is registered there with each tier as an alias; only the `auto` rewriting is skipped.)
 
-## Hosted tiers via AWS Bedrock
+**`logs/dl-*.log` is multi-GB and growing** → you're hitting [llama.cpp issue #14802](https://github.com/ggml-org/llama.cpp/issues/14802) where modern `llama-cli` is chat-only and ignores `-no-cnv`, looping `> ` prompts forever (~1.5 MB/s). Fix: `llmstack download` already prefers `llama-completion` over `llama-cli` when both are present (`brew install llama.cpp` ships both as of 2025). If you only have legacy `llama-cli`, either upgrade `llama.cpp` or kill the runaways with `pkill -9 -f llama-cli`.
 
-Any tier in `models.ini` that declares `aws_model_id = ...` is served from
-AWS Bedrock instead of llama-swap. The same tier names + auto-routing apply,
-so swapping `code-smart` from a local GGUF to Claude on Bedrock is a
-`models.ini` edit + `llmstack install` + `llmstack restart` away — clients
-don't change.
+**LiteLLM tier 401 / auth errors** → the router process didn't see your provider API key. Credentials are read from environment variables at process start (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `AWS_*` for Bedrock-via-LiteLLM, …). Export them in the shell *before* `llmstack start`, or set them in `.llmstack/litellm_config.yaml` per-model via `os.environ/<NAME>`. Restart the stack after changing creds — they're not picked up live.
+
+## Hosted tiers via LiteLLM
+
+Any tier in `models.ini` that declares a `model = <provider>/<model-id>` key is
+served by [LiteLLM](https://docs.litellm.ai/) instead of llama-swap. The same
+tier names + auto-routing apply, so swapping `code-smart` from a local GGUF to
+Claude Sonnet on Anthropic is a `models.ini` edit + `llmstack install` +
+`llmstack restart` away — clients don't change.
 
 ```ini
 [code-smart]
+tier         = code
 role         = agent
-aws_model_id = anthropic.claude-sonnet-4-5-20250929-v1:0
-aws_region   = us-west-2
-aws_profile  = bedrock-prod          ; named profile in ~/.aws/config
+backend      = litellm
+model        = anthropic/claude-sonnet-4-20250514
 ctx_size     = 200000
-sampler      = temp=0.5    ; Sonnet 4.5 accepts ONE of temp / top_p
-description  = Claude Sonnet 4.5 on Bedrock - heavy coder for agent loops
+max_output_tokens = 16384
+sampler      = temp=0.5    ; Sonnet 4 accepts ONE of temp / top_p
+description  = Claude Sonnet 4 via Anthropic API - heavy coder for agent loops
 ```
+
+The bundled `models.ini` template ships every tier with a commented-out
+"LiteLLM alternative" block beneath the active GGUF block. To swap a tier:
+comment out the GGUF block, uncomment the litellm block, and run `llmstack
+install && llmstack restart`. The `code-ultra` tier is shipped fenced with
+`AUTO-ENABLE-WHEN-LITELLM-AVAILABLE` markers — `llmstack install`
+auto-uncomments it on first seed when `import litellm` succeeds, otherwise
+it stays inert.
 
 > **Sampler is per-tier, declared in `models.ini`, applied per backend.**
 > `opencode.json` is intentionally sampler-free in both cases — clients
@@ -556,93 +574,92 @@ description  = Claude Sonnet 4.5 on Bedrock - heavy coder for agent loops
 >   `--temp` / `--top-p` / `--top-k` / `--min-p` / `--repeat-penalty`
 >   flags. llama-server applies them as its defaults for every request.
 >   The router doesn't touch the body.
-> - **Bedrock tiers** — Bedrock has no server-side defaults mechanism,
+> - **LiteLLM tiers** — LiteLLM has no server-side defaults mechanism,
 >   so the router injects the sampler keys into each outbound request
->   body (mapping `temp` → `temperature`, `top_p` → `topP`; the other
->   llama.cpp-extension keys `top_k`/`min_p`/`rep_pen` are silently
->   dropped because Converse doesn't accept them). Caller-supplied
->   values in the request body still win for per-call overrides.
+>   body (mapping `temp` → `temperature`, `top_p` → `top_p`; the other
+>   llama.cpp-extension keys `top_k`/`min_p`/`rep_pen` are passed through
+>   and silently dropped by LiteLLM if the provider doesn't accept them
+>   — `litellm_settings.drop_params: true` is set in the bundled
+>   `litellm_config.yaml`). Caller-supplied values in the request body
+>   still win for per-call overrides.
 >
-> Per-Bedrock-family rules (declare only what your Bedrock model
-> accepts):
+> Per-provider sampler rules (declare only what your model accepts):
 >
-> | Bedrock model family | What `sampler` may contain |
+> | Provider / model family | What `sampler` may contain |
 > |---|---|
-> | Claude Opus 4.7+ | (omit `sampler =` entirely — Opus 4.7 rejects all sampler params) |
-> | Claude Sonnet 4.5 / Haiku 4.5 | `temp` **or** `top_p`, never both |
-> | Claude Opus 4.x (4.1, 4.5, 4.6) | `temp` and/or `top_p` |
-> | Llama / Titan / Cohere / etc. | `temp` and/or `top_p` (check the model card) |
+> | Claude Opus 4 (4.0+) | (omit `sampler =` entirely — Opus 4 rejects all sampler params) |
+> | Claude Sonnet 4 / Haiku 4.5 | `temp` **or** `top_p`, never both |
+> | Claude Opus 3.x | `temp` and/or `top_p` |
+> | OpenAI / Llama / Groq / Mistral / Cohere / etc. | `temp` and/or `top_p` (check the model card) |
 >
 > Local gguf tiers accept the full set (`temp`, `top_p`, `top_k`,
 > `min_p`, `rep_pen`) — llama-server honours all of them as startup
 > defaults.
 
-`models.ini` is meant to be committable, so it **only names a profile**.
-Credentials, SSO, role chaining, MFA — everything boto3 normally
-handles — live in the standard AWS shared config:
+`models.ini` is meant to be committable, so it **only names the model**.
+Credentials live in environment variables (or LiteLLM's own config), and
+LiteLLM resolves them transparently:
 
 ```bash
-aws configure --profile bedrock-prod        # static keys
-aws configure sso --profile bedrock-prod    # SSO
-
-# role chaining: edit ~/.aws/config, add a profile like
-# [profile bedrock-planning]
-# role_arn       = arn:aws:iam::123456789012:role/llmstack-bedrock
-# source_profile = bedrock-prod
-# region         = us-east-1
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+export GROQ_API_KEY=gsk-...
+# AWS Bedrock through LiteLLM uses the boto3 chain (env vars / ~/.aws/*)
+export AWS_REGION=eu-west-3
 ```
 
-Then reference the profile by name from each tier. Different tiers can
-point at different profiles, so two tiers can live in different
-accounts/regions cleanly:
+See [LiteLLM provider docs](https://docs.litellm.ai/docs/providers) for
+provider-specific setup (Bedrock role chaining, Azure deployment names,
+custom endpoints, …). Per-tier credential overrides live in
+`<work-dir>/.llmstack/litellm_config.yaml` — `llmstack install`
+non-destructively merges new tier stubs into its `model_list`, so any
+edits you make to existing entries (custom `api_base`, per-model API
+keys via `os.environ/<NAME>`, retries, fallbacks, …) survive across
+installs.
 
 | Key (in `models.ini`) | Meaning |
 |---|---|
-| `aws_model_id` | Bedrock model ID (`anthropic.claude-...`, `meta.llama3-1-...`, etc.). Required. |
-| `aws_region` | Region the tier lives in. Falls back to the profile's region / `AWS_REGION` / default chain. |
-| `aws_profile` | Named profile in `~/.aws/config` / `~/.aws/credentials`. Omit for boto3's default chain (env vars, default profile, instance role). |
-| `aws_endpoint_url` | Custom Bedrock endpoint (VPC endpoint, FedRAMP, etc.). |
-| `aws_model_id_next` (+ optional `aws_region_next`) | Queued upgrade target. Mirrors gguf `hf_file_next`: `llmstack start --next` swaps the tier to this model id (and region, if set) until you switch back; permanent promotion is `aws_model_id` edit + `llmstack install`. |
-| `backend = bedrock` | Optional explicit override; auto-detected from `aws_model_id`. |
+| `model` | LiteLLM model id (`anthropic/claude-sonnet-4-...`, `openai/gpt-4o-...`, `bedrock/eu.anthropic.claude-...`, `groq/llama-3.1-70b-...`, etc.). Required. |
+| `model_next` | Queued upgrade target. Mirrors gguf `hf_file_next`: `llmstack install --next` swaps the tier to this model id until you switch back; permanent promotion is `model` edit + `llmstack install`. |
+| `max_output_tokens` | Cap on output tokens for the tier. Useful for cost discipline on top-tier models. |
+| `backend = litellm` | Optional explicit override; auto-detected when `model` is set. |
 
-Banned in `models.ini` (parse-time error): `aws_access_key_id`,
-`aws_secret_access_key`, `aws_session_token`, `aws_role_arn`,
-`aws_role_session_name`. Put them in `~/.aws/credentials` or
-`~/.aws/config` under a named profile and reference the profile.
+Banned in `models.ini` (file is meant to be committable): any key holding
+secrets — API keys, AWS access keys, session tokens, role ARNs, etc. Put
+them in environment variables, your provider's standard credential file
+(`~/.aws/credentials`, `~/.config/openai/...`), or the per-project
+`litellm_config.yaml` referencing `os.environ/<NAME>`.
 
-Internally the router builds one `bedrock-runtime` client per
-distinct (profile, region, endpoint) tuple, cached for the life of the
-process. Credential refresh (SSO token rotation, role re-assumption,
-IMDS) is handled by boto3 transparently.
-
-Install the AWS SDK (it's an opt-in extra so the local-only path stays
+Install the LiteLLM extra (it's opt-in so the local-only path stays
 small):
 
 ```bash
-pip install -e '.[bedrock]'
+pip install -e '.[litellm]'                    # editable, from this repo
+pip install 'opencode-llmstack[litellm]'       # from PyPI
 ```
 
-The router translates OpenAI chat/completions to [Bedrock Converse]
-(text + tool calls; streaming and non-streaming both supported) and
-streams the response back as standard OpenAI SSE. Multimodal inputs are
-text-only for now.
+The extra pulls in `litellm[proxy]` which provides the `litellm` CLI.
+Internally, `llmstack start` registers the proxy as a model in
+llama-swap (`litellm_proxy` on `127.0.0.1:10103`) with every
+litellm-backed tier as an alias. A request for `code-smart` (or any
+alias) flows: client → router (`:10101`) → llama-swap (`:10102`) →
+litellm proxy (`:10103`) → provider. Streaming and non-streaming both
+work; tool calls are passed through. The proxy's admin UI lives at
+`http://127.0.0.1:10103/ui` and its MCP gateway at `/mcp`.
 
-[Bedrock Converse]: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+Hosted tiers are skipped by `llmstack download` (nothing to fetch) and
+by the `llama-swap.yaml` matrix (nothing to load locally). They show up
+in `llmstack check` with the model id instead of HF metadata, and in
+`/v1/models` alongside the local GGUF tiers — including a
+`channel: current|next` metadata field so clients can tell which model
+id they're actually talking to.
 
-Hosted tiers are skipped by `llmstack download` (nothing to fetch) and by
-the `llama-swap.yaml` matrix (nothing to load). They show up in
-`llmstack check` with the model id + region (and a `next` row when
-`aws_model_id_next` is set) instead of HF metadata, and in `/v1/models`
-alongside the local GGUF tiers — including a `channel: current|next`
-metadata field so clients can tell which model id they're actually
-talking to.
-
-`llmstack start --next` flips both backends in lock-step: gguf tiers
-swap to `hf_file_next` and bedrock tiers swap to `aws_model_id_next`
-(the router subprocess is launched with `LLMSTACK_USE_NEXT=1`). Either
-backend having a queued upgrade is enough to satisfy `--next`.
-
-**`logs/dl-*.log` is multi-GB and growing** → you're hitting [llama.cpp issue #14802](https://github.com/ggml-org/llama.cpp/issues/14802) where modern `llama-cli` is chat-only and ignores `-no-cnv`, looping `> ` prompts forever (~1.5 MB/s). Fix: `llmstack download` already prefers `llama-completion` over `llama-cli` when both are present (`brew install llama.cpp` ships both as of 2025). If you only have legacy `llama-cli`, either upgrade `llama.cpp` or kill the runaways with `pkill -9 -f llama-cli`.
+`llmstack install --next` flips both backends in lock-step: gguf tiers
+swap to `hf_file_next` and litellm tiers swap to `model_next` (the
+router subprocess sees `LLMSTACK_USE_NEXT=1` and rewrites
+`body["model"]` to `<tier>_next`, which llama-swap routes to the
+`<tier>_next` entry in `litellm_config.yaml`). Either backend having a
+queued upgrade is enough to satisfy `--next`.
 
 ## Replacing a model with a newer/better one
 

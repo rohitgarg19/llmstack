@@ -2,10 +2,10 @@
 
 The activate hook normally re-evaluates env and ``PROMPT`` / ``PS1`` on
 every chpwd, so cd-ing into a project (or switching between projects)
-keeps things current. But mid-session events -- ``llmstack start --next``
-inside an already-active shell, the channel marker getting rewritten by
-another process, etc. -- don't trigger a chpwd, so the prompt would stay
-stale until the next directory change.
+keeps things current. But mid-session events -- ``llmstack install
+--next && llmstack restart`` inside an already-active shell, the channel
+marker getting rewritten by another process, etc. -- don't trigger a
+chpwd, so the prompt would stay stale until the next directory change.
 
 Pipe this command's output through your shell's eval to apply the
 current channel's env + prompt in-place::

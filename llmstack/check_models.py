@@ -74,11 +74,11 @@ def main(argv: list[str] | None = None) -> int:
 
     drift = []
     for tier in tiers.values():
-        if tier.is_bedrock and tier.bedrock is not None:
-            b = tier.bedrock
+        if tier.is_litellm and tier.litellm is not None:
+            b = tier.litellm
             scope_parts = [p for p in (b.region, b.profile) if p]
             scope = " / ".join(scope_parts) if scope_parts else "(default chain)"
-            print(fmt.format(tier.name, "bedrock", b.model_id, "-", "-", scope))
+            print(fmt.format(tier.name, "litellm", b.model_id, "-", "-", scope))
             if b.has_next:
                 next_scope_parts = [p for p in (b.region_next or b.region, b.profile) if p]
                 next_scope = " / ".join(next_scope_parts) if next_scope_parts else "(default chain)"

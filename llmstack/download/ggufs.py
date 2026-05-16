@@ -93,7 +93,7 @@ def download_all() -> list[DownloadJob]:
         print(f"[*] hosted (no download): {', '.join(hosted_tiers)}")
 
     if not targets:
-        # All tiers in the ini are hosted (e.g. bedrock-only) -- nothing
+        # All tiers in the ini are hosted (e.g. litellm-only) -- nothing
         # to fetch. Don't fail; downloads are an optional step in a
         # cloud-only deployment.
         print("[*] no GGUF tiers configured -- nothing to download.")
@@ -128,7 +128,7 @@ def download_all() -> list[DownloadJob]:
     print("    llama-cli -cl                        # lists completed cache entries")
     print()
     print("When you want to try queued upgrade targets without committing:")
-    print("    llmstack stop && llmstack start --next")
+    print("    llmstack install --next && llmstack restart")
     return jobs
 
 

@@ -1,0 +1,54 @@
+# LiteLLM AI Gateway (proxy) configuration for opencode-llmstack.
+#
+# Lifecycle: this file is owned by you. `llmstack install` will MERGE
+# additions into it (notably model_list entries for any litellm-backed
+# tier in models.ini, named after the `[section]` heading) but never
+# overwrites your customisations -- entries you've edited are preserved
+# across installs.
+#
+# Process: the litellm proxy is started by llama-swap as a model entry
+# named `litellm_proxy`, listening on http://127.0.0.1:10103. The router
+# (port 10101) HTTP-proxies any request that resolves to a litellm tier
+# to that endpoint. The proxy's admin UI / dashboard is at
+# http://127.0.0.1:10103/ui and its MCP gateway at /mcp.
+#
+# API keys are resolved from environment variables by default:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export OPENAI_API_KEY=sk-...
+#   export GROQ_API_KEY=gsk-...
+# Or per-model via os.environ/<NAME> in litellm_params (see litellm docs).
+
+litellm_settings:
+  drop_params: true        # silently drop unsupported params instead of erroring
+  request_timeout: 120
+
+# model_list is populated by `llmstack install` based on the litellm-backed
+# tiers declared in models.ini. Each entry is named after the tier's
+# `[section]` heading (e.g. `code-ultra`). Edit freely -- llmstack only
+# adds missing entries and never rewrites yours.
+model_list: []
+
+# mcp_servers: declare named MCP servers here to make them available to
+# both the litellm proxy (and its dashboard / OpenAI-Responses-API tool
+# bridge) and to opencode (mirrored into opencode.json `mcp.*` on every
+# `llmstack install`). One source of truth, two consumers.
+#
+# Example entries (uncomment + edit):
+#
+# mcp_servers:
+#   context7:
+#     url: "https://mcp.context7.com/mcp"
+#     transport: "http"
+#     description: "Context7 docs search"
+#   github_mcp:
+#     url: "https://api.githubcopilot.com/mcp"
+#     transport: "http"
+#     auth_type: "bearer_token"
+#     auth_value: "os.environ/GITHUB_TOKEN"
+#   strands_mcp:
+#     transport: "stdio"
+#     command: "uvx"
+#     args: ["strands-agents-mcp-server"]
+#     env:
+#       FASTMCP_LOG_LEVEL: "INFO"
+mcp_servers: {}

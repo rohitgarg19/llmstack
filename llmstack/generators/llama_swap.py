@@ -40,10 +40,12 @@ from pathlib import Path
 import yaml
 
 from llmstack._platform import EXE_SUFFIX, IS_WINDOWS
-from llmstack.paths import models_ini_path
+from llmstack.paths import models_ini_path, resolve
 from llmstack.tiers import _int, load_tiers
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
+LITELLM_PROXY_PORT = 10103
+LITELLM_PROXY_NAME = "litellm_proxy"
 
 
 def _default_llama_server_bin() -> str:
@@ -88,9 +90,51 @@ def _default_llama_server_bin() -> str:
 LLAMA_SERVER_BIN_DEFAULT = _default_llama_server_bin()
 HEALTH_CHECK_TIMEOUT = 600
 LOG_LEVEL = "info"
-LOG_TO_STDOUT = "proxy"
+LOG_TO_STDOUT = "both"
 START_PORT = 10001
 GLOBAL_TTL = 0
+
+
+def _default_litellm_bin() -> str:
+    """Best-guess absolute path of the ``litellm`` proxy CLI.
+
+    Same resolution strategy as ``llama-server``: explicit env var, then
+    PATH, then conventional locations. Returns the bare name as a last
+    resort so llama-swap surfaces the failure instead of us.
+    """
+    explicit = os.environ.get("LITELLM_BIN", "").strip()
+    if explicit:
+        return explicit
+    found = shutil.which(f"litellm{EXE_SUFFIX}")
+    if found:
+        return found
+    return f"litellm{EXE_SUFFIX}"
+
+
+def build_litellm_proxy_cmd() -> str:
+    """Build the ``cmd`` literal for the ``litellm_proxy`` model section.
+
+    The litellm proxy must listen on a fixed well-known port
+    (``LITELLM_PROXY_PORT``) so the router, status checks, and
+    ``opencode.json`` all agree on where to find it without
+    service-discovery.
+
+    llama-swap captures stdout/stderr from all managed processes and
+    writes them to its own log (``logToStdout: both``), so litellm's
+    output lands in ``llama-swap.log`` alongside the proxy logs.
+
+    Uses ``--config`` pointed at the per-project ``litellm_config.yaml``
+    resolved through :mod:`llmstack.paths`, so the same CLI works for
+    ``current`` and ``next`` channels (both share the file).
+    """
+    bin_path = _default_litellm_bin()
+    yaml_path = resolve().litellm_config
+    return (
+        f"{bin_path}\n"
+        f"--config {yaml_path}\n"
+        f"--host 127.0.0.1\n"
+        f"--port {LITELLM_PROXY_PORT}\n"
+    )
 
 ROLE_LETTER: dict[str, str] = {
     "fast":            "f",
@@ -171,7 +215,7 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
     for any request that does not override them in the body.
 
     This keeps the per-request injection path (in
-    :func:`llmstack.app._inject_sampler`) Bedrock-only -- gguf
+    :func:`llmstack.app._inject_sampler`) litellm-only -- gguf
     sampling is a server-startup concern, since the CLI flags
     survive across requests and don't break any backend's schema.
     """
@@ -205,7 +249,7 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
             lines += [
                 "# Queued upgrade target (already pre-fetched if `llmstack download` has run):",
                 f"#   -hff {tier.file_next}",
-                "# Try it without committing: llmstack start --next",
+                "# Try it without committing: llmstack install --next && llmstack restart",
             ]
 
     lines += [
@@ -252,10 +296,19 @@ def ttl_for(tier, section) -> int:
 def build_models_block(cfg, *, use_next: bool = False) -> dict:
     tiers = load_tiers()
     out: dict = {}
+    has_litellm = False
+    litellm_aliases: list[str] = []
     for name, tier in tiers.items():
+        if tier.is_litellm:
+            has_litellm = True
+            base = name
+            litellm_aliases.append(base)
+            if tier.litellm and tier.litellm.has_next:
+                litellm_aliases.append(f"{base}_next")
         if not tier.is_gguf:
-            # Hosted tiers (bedrock, ...) are dispatched by the router
-            # directly; llama-swap doesn't see them.
+            # Remote tiers (litellm, ...) are handled by the litellm
+            # proxy entry below; llama-swap doesn't load them as
+            # llama-server processes.
             continue
         section = cfg[name]
         running_next = use_next and bool(tier.file_next)
@@ -278,10 +331,49 @@ def build_models_block(cfg, *, use_next: bool = False) -> dict:
                 "channel": "next" if running_next else "current",
             },
         }
+
+    if has_litellm:
+        # Always-on, externally-managed-config model. Lives at a fixed
+        # port (LITELLM_PROXY_PORT) so the router and any external
+        # dashboard / MCP client always know where to find it. The
+        # aliases list is the routing table: when a request comes in
+        # for a model named ``<tier>_<role>``, llama-swap loads (or
+        # keeps loaded) this entry and forwards the request to the
+        # litellm proxy, which dispatches by ``model_name`` against
+        # ``litellm_config.yaml``'s ``model_list``.
+        #
+        # llama-swap requires ${PORT} in cmd (validation rule), but the
+        # litellm proxy must listen on a *fixed* well-known port so the
+        # router, status checks, and opencode.json all agree on where to
+        # find it. The ``proxy`` field overrides the default
+        # ``http://localhost:${PORT}`` forwarding target, pointing
+        # llama-swap at the fixed port while the cmd still satisfies the
+        # ${PORT} validation requirement.
+        out[LITELLM_PROXY_NAME] = {
+            "name": "litellm proxy (remote model gateway + MCP + dashboard)",
+            "description": "litellm proxy: hosts every backend=litellm tier, /ui dashboard, /mcp gateway",
+            "cmd": build_litellm_proxy_cmd(),
+            "proxy": f"http://127.0.0.1:{LITELLM_PROXY_PORT}",
+            "ttl": 0,
+            "aliases": litellm_aliases,
+            "metadata": {
+                "tier": "litellm-proxy",
+                "role": "proxy",
+                "channel": "current",
+                "port": LITELLM_PROXY_PORT,
+            },
+        }
     return out
 
 
-def build_matrix(cfg) -> dict:
+def build_matrix(cfg) -> dict | None:
+    """Build the ``matrix`` block for llama-swap.
+
+    Returns ``None`` when there are no gguf tiers -- llama-swap only
+    validates the matrix when the key is present, and it requires at
+    least one set when it is. Omitting the key entirely is the correct
+    signal for an all-litellm (no local model) configuration.
+    """
     tiers = load_tiers()
     vars_: dict[str, str] = {}
     evict: dict[str, int] = {}
@@ -295,6 +387,11 @@ def build_matrix(cfg) -> dict:
         vars_[letter] = name
         size_gb = parse_size_gb(cfg[name].get("size_gb", ""), default=5.0)
         evict[letter] = evict_cost(size_gb)
+
+    # No gguf tiers at all -- omit the matrix key so llama-swap doesn't
+    # attempt to validate an empty sets block.
+    if not vars_:
+        return None
 
     sets: dict[str, str] = {}
     fast = "f"
@@ -321,20 +418,21 @@ HEADER_CURRENT = """\
 # yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
 #
 # AUTO-GENERATED by llmstack.generators.llama_swap from models.ini.
-# Written by `llmstack start` on each fresh launch; hand edits will be
-# overwritten next time the stack starts. To change behaviour, edit
-# models.ini (per-tier or [DEFAULT]) and re-run `llmstack restart`.
+# Written by `llmstack install` (channel pinned at install time); hand
+# edits will be overwritten next time the stack installs. To change
+# behaviour, edit models.ini (per-tier or [DEFAULT]) and re-run
+# `llmstack install` (and `llmstack restart` to reload daemons).
 """
 
 HEADER_NEXT = """\
 # yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
 #
 # AUTO-GENERATED by llmstack.generators.llama_swap --use-next from models.ini.
-# This is the EPHEMERAL "next" config produced by `llmstack start --next`.
-# Tiers with hf_file_next defined are running their queued upgrade target;
-# all other tiers are unchanged. Do not commit this file. To make any of
-# these promotions permanent, flip hf_file/hf_file_next in models.ini and
-# re-run `llmstack restart` -- that regenerates the canonical yaml.
+# This is the "next" config produced by `llmstack install --next`. Tiers
+# with hf_file_next defined are running their queued upgrade target; all
+# other tiers are unchanged. To make any of these promotions permanent,
+# flip hf_file/hf_file_next in models.ini and re-run `llmstack install
+# --current` -- that regenerates the canonical yaml.
 """
 
 
@@ -351,8 +449,10 @@ def build_config(*, use_next: bool = False) -> dict:
 
     tiers = load_tiers()
     preload = [name for name, t in tiers.items() if t.role == "fast" and t.is_gguf]
+    if any(t.is_litellm for t in tiers.values()):
+        preload.append(LITELLM_PROXY_NAME)
 
-    return {
+    config: dict = {
         "healthCheckTimeout": HEALTH_CHECK_TIMEOUT,
         "logLevel": LOG_LEVEL,
         "logToStdout": LOG_TO_STDOUT,
@@ -365,11 +465,16 @@ def build_config(*, use_next: bool = False) -> dict:
             "metal_defaults": metal_defaults,
         },
         "models": build_models_block(cfg, use_next=use_next),
-        "matrix": build_matrix(cfg),
-        "hooks": {
-            "on_startup": {"preload": preload},
-        },
     }
+
+    matrix = build_matrix(cfg)
+    if matrix is not None:
+        config["matrix"] = matrix
+
+    config["hooks"] = {
+        "on_startup": {"preload": preload},
+    }
+    return config
 
 
 def render(*, use_next: bool = False) -> str:

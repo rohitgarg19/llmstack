@@ -1,5 +1,5 @@
 """
-FastAPI auto-router proxy in front of llama-swap (and AWS Bedrock).
+FastAPI auto-router proxy in front of llama-swap (and litellm).
 
 Public endpoint: ``http://127.0.0.1:10101``
 Upstream:        ``http://127.0.0.1:10102`` (llama-swap)
@@ -8,7 +8,7 @@ Behaviour:
 
 * ``GET /v1/models``                       -> proxied verbatim, plus an
                                               ``auto`` entry and any
-                                              hosted (e.g. bedrock) tiers
+                                              remote (e.g. litellm) tiers
                                               declared in ``models.ini``.
 * ``GET /models.ini``                      -> raw text of the router's
                                               ``models.ini``. Thin
@@ -38,8 +38,8 @@ Behaviour:
       and rewrite ``model`` -> one of: ``code-fast``, ``code-smart``,
       ``code-ultra`` (when wired).
     - otherwise pass through unchanged.
-    - tiers with ``backend = bedrock`` in ``models.ini`` are dispatched
-      to AWS Bedrock via :mod:`llmstack.backends.bedrock` instead of
+    - tiers with ``backend = litellm`` in ``models.ini`` are dispatched
+      to LiteLLM via :mod:`llmstack.backends.litellm` instead of
       proxied to llama-swap.
 * Streaming (SSE) responses are forwarded chunk-by-chunk.
 * Anything else is reverse-proxied.
@@ -48,7 +48,7 @@ Routing philosophy: **start at the top of the fidelity ladder and
 step DOWN as context grows**. This inverts the classic
 "escalate-on-size" pattern, and it's deliberate:
 
-  * Top-tier hosted models (Claude Opus/Sonnet on Bedrock) are
+  * Top-tier hosted models (Claude Opus/Sonnet on litellm) are
     fastest *and* most accurate on short prompts, but their
     per-request latency and $cost scale with input tokens, and
     long-context performance degrades faster than headline
@@ -97,7 +97,7 @@ from ``models.ini`` (i.e. present in :data:`TIER_BY_ALIAS`). When
 it isn't, the router silently falls back to ``code-smart`` --
 otherwise rewriting ``model`` to a tier name that isn't wired up
 surfaces as a 404 from llama-swap or a tier-not-found error from
-the bedrock dispatcher, which is just a confusing way to fail.
+the litellm dispatcher, which is just a confusing way to fail.
 
 Run with::
 
@@ -120,13 +120,37 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from llmstack.paths import models_ini_path
-from llmstack.tiers import Tier, load_tiers
+from llmstack.tiers import (
+    Tier,
+    load_router_endpoint,
+    load_routing,
+    load_tiers,
+    tier_name_for_role,
+)
 
-UPSTREAM = os.getenv("LLAMA_SWAP_URL", "http://127.0.0.1:10102").rstrip("/")
+# Router endpoint and upstream URL come from models.ini ``[DEFAULT]``
+# (host / router_port) plus :data:`llmstack.paths.SWAP_PORT`. No env
+# var fallbacks -- if you need to point at a different llama-swap, edit
+# models.ini and re-run ``llmstack install``.
+_ENDPOINT = load_router_endpoint()
+from llmstack.paths import SWAP_PORT
+UPSTREAM = f"http://{_ENDPOINT.host}:{SWAP_PORT}"
 
-FAST_MODEL = os.getenv("ROUTER_FAST_MODEL", "code-fast")
-AGENT_MODEL = os.getenv("ROUTER_AGENT_MODEL", "code-smart")
-ULTRA_MODEL = os.getenv("ROUTER_ULTRA_MODEL", "code-ultra")
+USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
+
+
+def _use_next() -> bool:
+    """``--next`` channel flag, honoured by litellm tier dispatch."""
+    return os.environ.get(USE_NEXT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+# Symbolic auto-router rungs. Names are resolved from models.ini by
+# matching on tier ``role`` so renaming a tier (e.g. swapping
+# ``code-fast`` for ``code-haiku``) needs no code change. ``None`` if
+# no tier with that role is loaded -- :func:`_ultra_available` and
+# :func:`classify` handle missing rungs gracefully.
+FAST_MODEL = tier_name_for_role("fast") or "code-fast"
+AGENT_MODEL = tier_name_for_role("agent") or "code-smart"
+ULTRA_MODEL = tier_name_for_role("ultra") or "code-ultra"
 
 # Step-DOWN ladder (see module docstring). Both ceilings are *upper
 # bounds* of a tier's sweet-spot range, expressed in estimated input
@@ -150,9 +174,14 @@ ULTRA_MODEL = os.getenv("ROUTER_ULTRA_MODEL", "code-ultra")
 #                top-tier latency/$cost balloons and code-smart starts
 #                getting cramped, while code-fast's 128k YaRN window
 #                still has comfortable headroom.
-HIGH_FIDELITY_CEILING = int(os.getenv("ROUTER_HIGH_FIDELITY_CEILING", "12000"))
-MID_FIDELITY_CEILING = int(os.getenv("ROUTER_MID_FIDELITY_CEILING", "32000"))
-MULTI_TURN_THRESHOLD = int(os.getenv("ROUTER_MULTI_TURN", "10"))
+#
+# Source of truth: models.ini ``[ROUTING]`` (high_fidelity_ceiling,
+# mid_fidelity_ceiling, multi_turn). No env-var overrides -- edit the
+# ini and re-run ``llmstack install`` to change these.
+_ROUTING = load_routing()
+HIGH_FIDELITY_CEILING = _ROUTING.high_fidelity_ceiling
+MID_FIDELITY_CEILING = _ROUTING.mid_fidelity_ceiling
+MULTI_TURN_THRESHOLD = _ROUTING.multi_turn
 AUTO_ALIASES = {"auto", "", None}
 
 ULTRA_TRIGGERS = re.compile(
@@ -172,15 +201,15 @@ async def _lifespan(app: FastAPI):
     global client
     timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
     client = httpx.AsyncClient(base_url=UPSTREAM, timeout=timeout)
-    bedrock_tiers = sorted(t.name for t in TIERS.values() if t.is_bedrock)
+    litellm_tiers = sorted(t.name for t in TIERS.values() if t.is_litellm)
     log.info(
         "router up upstream=%s ladder=[ultra<=%d -> agent<=%d -> fast] "
-        "fast=%s agent=%s ultra=%s bedrock=%s",
+        "fast=%s agent=%s ultra=%s litellm=%s",
         UPSTREAM, HIGH_FIDELITY_CEILING, MID_FIDELITY_CEILING,
         FAST_MODEL, AGENT_MODEL,
         f"{ULTRA_MODEL} (active)" if _ultra_available()
             else f"{ULTRA_MODEL} (unwired -- high-fidelity rung falls back to {AGENT_MODEL})",
-        ",".join(bedrock_tiers) or "(none)",
+        ",".join(litellm_tiers) or "(none)",
     )
     yield
     if client:
@@ -201,7 +230,7 @@ def _index_tiers() -> None:
     except SystemExit as exc:
         # No models.ini -- run as a pure pass-through proxy and let
         # downstream errors describe the problem.
-        log.warning("models.ini not loaded (%s); bedrock dispatch disabled", exc)
+        log.warning("models.ini not loaded (%s); litellm dispatch disabled", exc)
         TIERS = {}
     TIER_BY_ALIAS = {}
     for tier in TIERS.values():
@@ -262,7 +291,7 @@ def _ultra_available() -> bool:
     the guard, an explicit ``[ultra]`` trigger or the high-fidelity
     rung of the step-down ladder on a vanilla install (no
     ``code-ultra`` section) would rewrite ``model`` to a tier that
-    doesn't exist downstream -- llama-swap returns 404, the bedrock
+    doesn't exist downstream -- llama-swap returns 404, the litellm
     dispatcher raises -- so the request would fail even though
     falling back to ``code-smart`` would have served it just fine.
     The check is a cheap dict lookup so we run it on every classify
@@ -422,19 +451,19 @@ async def list_models() -> JSONResponse:
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
         data = {"object": "list", "data": []}
 
-    # Hosted (bedrock) tiers aren't known to llama-swap; fold them in.
+    # Hosted (litellm) tiers aren't known to llama-swap; fold them in.
     seen = {entry.get("id") for entry in data["data"] if isinstance(entry, dict)}
-    from llmstack.backends import bedrock as bedrock_backend
+    from llmstack.backends import litellm_backend
     for tier in TIERS.values():
-        if not tier.is_bedrock:
+        if not tier.is_litellm:
             continue
         if tier.name in seen:
             continue
-        data["data"].append(bedrock_backend.model_descriptor(tier))
+        data["data"].append(litellm_backend.model_descriptor(tier))
         seen.add(tier.name)
         for alias in tier.aliases:
             if alias not in seen:
-                desc = bedrock_backend.model_descriptor(tier)
+                desc = litellm_backend.model_descriptor(tier)
                 desc["id"] = alias
                 desc["name"] = f"{tier.description} (alias of {tier.name})"
                 data["data"].append(desc)
@@ -479,7 +508,7 @@ def _resolve_tier(name: str | None) -> Tier | None:
 # Map the short sampler keys used in models.ini to the OpenAI-compatible
 # request-body fields that downstream backends understand. llama.cpp
 # accepts `top_k`, `min_p`, and `repetition_penalty` as extensions; the
-# Bedrock backend ignores fields it can't translate to Converse.
+# litellm backend ignores fields it can't translate to Converse.
 _SAMPLER_BODY_FIELD = {
     "temp":    "temperature",
     "top_p":   "top_p",
@@ -492,12 +521,12 @@ _SAMPLER_BODY_FIELD = {
 def _inject_sampler(body: dict[str, Any], tier: Tier) -> bool:
     """Layer this tier's `sampler = ...` defaults onto the request body.
 
-    **Bedrock-only.** For gguf tiers, sampling defaults are baked into
+    **LiteLLM-only.** For gguf tiers, sampling defaults are baked into
     the llama-server startup command line by
     :mod:`llmstack.generators.llama_swap`, so llama-server already
     applies them for any request whose body lacks an explicit value.
-    Bedrock has no equivalent server-side mechanism -- the only place to
-    apply per-tier sampling for hosted models is the outbound request
+    LiteLLM has no equivalent server-side mechanism -- the only place to
+    apply per-tier sampling for remote models is the outbound request
     body, which is what this function does.
 
     Caller-supplied values always win -- if the client already set
@@ -508,11 +537,11 @@ def _inject_sampler(body: dict[str, Any], tier: Tier) -> bool:
     Returns ``True`` iff anything was added (the caller re-encodes the
     raw body bytes only when the dict actually changed).
 
-    A Bedrock tier with an empty sampler dict (no `sampler =` line, or
-    all keys stripped) is a no-op -- the canonical pattern for Bedrock
-    families like Claude Opus 4.7 that reject every sampler param.
+    A litellm tier with an empty sampler dict (no `sampler =` line, or
+    all keys stripped) is a no-op -- the canonical pattern for models
+    that reject sampler params.
     """
-    if not tier.is_bedrock or not tier.sampler:
+    if not tier.is_litellm or not tier.sampler:
         return False
     mutated = False
     for src, dst in _SAMPLER_BODY_FIELD.items():
@@ -584,13 +613,24 @@ async def _handle_completion(req: Request, path: str) -> Response:
     if tier is not None and _inject_sampler(body, tier):
         mutated = True
 
+    # litellm tiers ride the same llama-swap dispatch path as gguf
+    # tiers: llama-swap registers each litellm tier as an alias of the
+    # ``litellm_proxy`` model entry, so a request for ``<tier>`` is
+    # forwarded to the litellm proxy (which dispatches by ``model_name``
+    # against ``model_list`` in litellm_config.yaml).
+    # The dashboard / MCP gateway stay reachable directly at
+    # http://127.0.0.1:10103 because llama-swap pins the proxy port.
+    if tier is not None and tier.is_litellm:
+        proxy_name = tier.name
+        if _use_next() and tier.litellm and tier.litellm.has_next:
+            proxy_name = f"{proxy_name}_next"
+        body["model"] = proxy_name
+        mutated = True
+
     if mutated:
         raw = json.dumps(body).encode()
 
-    if tier is not None and tier.is_bedrock:
-        from llmstack.backends import bedrock as bedrock_backend
-        resp = await bedrock_backend.dispatch(req, tier, body)
-    elif tier is not None and body.get("stream"):
+    if tier is not None and body.get("stream"):
         proxy = await _stream_proxy(req.method, path, raw, headers)
         injected: list[bool] = [False]
         tier_name = tier.name
@@ -649,10 +689,12 @@ def main() -> None:
     import uvicorn
 
     log_level = os.getenv("LOG_LEVEL", "info").lower()
-    host = os.getenv("ROUTER_HOST", "127.0.0.1")
-    port = int(os.getenv("ROUTER_PORT", "10101"))
-
-    cfg = uvicorn.Config(app, host=host, port=port, log_level=log_level)
+    cfg = uvicorn.Config(
+        app,
+        host=_ENDPOINT.host,
+        port=_ENDPOINT.router_port,
+        log_level=log_level,
+    )
     asyncio.run(uvicorn.Server(cfg).serve())
 
 

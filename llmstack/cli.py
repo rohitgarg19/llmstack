@@ -38,21 +38,22 @@ Actions:
       the llama-swap binary, print the shell activation hook, check opencode.
 
   install [--print] [--current | --next | --external [URL]]
-      Regenerate .llmstack/opencode.json (+ AGENTS.md copy) and pin
-      the default channel for the next `start`. The source of tier
-      config depends on channel:
+      Regenerate .llmstack/opencode.json (+ AGENTS.md copy), pin
+      the default channel for the next `start`, and -- for local
+      channels -- render .llmstack/llama-swap.yaml for that channel.
+      The source of tier config depends on channel:
 
         --current / --next (local)
           Read <work-dir>/.llmstack/models.ini, seeding it from the
-          bundled template on first run. llama-swap.yaml is NOT
-          touched -- `start` owns that and regenerates it for the
-          chosen channel on each launch.
+          bundled template on first run. Renders llama-swap.yaml for
+          the chosen channel; `start` consumes it as-is.
 
         --external [URL] (thin client)
           Fetch models.ini live from the router (`GET URL/models.ini`)
           and render opencode.json against that -- no local
-          models.ini is created or kept. Re-run `install` any time to
-          pick up router-side edits. URL precedence:
+          models.ini is created or kept, and no llama-swap.yaml is
+          written (the router owns the daemons). Re-run `install`
+          any time to pick up router-side edits. URL precedence:
             flag arg > $LLMSTACK_REMOTE_URL > the local router
             (http://127.0.0.1:10101).
           The localhost default is what makes "two projects, one
@@ -76,13 +77,14 @@ Actions:
       Download every GGUF named in models.ini (current + queued next) to
       the standard llama.cpp cache, in parallel, in the background.
 
-  start [--current | --next] [--detach]
-      Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
-      llama-swap (:10102) + auto-router (:10101). Default channel =
-      whatever `install` pinned, else `current`. `--next` swaps any tier
-      with hf_file_next. The yaml is regenerated on each fresh launch
-      so it always matches the live models.ini; if the daemons are
-      already up the running yaml is left alone.
+  start [--detach]
+      Bring up llama-swap (:10102) + auto-router (:10101) using the
+      .llmstack/llama-swap.yaml that `install` wrote. Channel is
+      whatever `install` pinned (else `current`); selection is an
+      install-time decision -- `start` does not accept --current /
+      --next and does not regenerate the yaml. To change channels or
+      pick up models.ini edits: `llmstack install [--current|--next]`
+      then `llmstack restart`.
 
       Subshell behaviour: if LLMSTACK_ACTIVE is already set (i.e. the
       activate hook has wired this shell up) `start` just brings up
@@ -115,8 +117,10 @@ Actions:
   stop
       Stop the router + llama-swap (and any orphaned llama-server children).
 
-  restart [--current | --next] [--detach]
-      stop + start. Convenient for cycling channels.
+  restart [--detach]
+      stop + start. Picks up a freshly-rendered llama-swap.yaml from
+      the most recent `llmstack install` (channel + sampler / ctx_size
+      / GGUF edits in models.ini land here).
 
   reload
       Emit shell commands that re-export LLMSTACK_CHANNEL +
@@ -124,7 +128,7 @@ Actions:
       prefix for the current channel marker. Pipe through eval to
       apply in-place (no nested subshell):
           eval "$(llmstack reload)"
-      Useful after `start --next` switches channels in an
+      Useful after `install --next && restart` switches channels in an
       already-active shell -- the activate hook only refreshes on
       chpwd, so without this the prompt would lag until your next cd.
 
@@ -229,7 +233,7 @@ def _load_action(action: str) -> Callable[[list[str]], int]:
             raise SystemExit(f"[!] unknown action: {action}\n\nrun: llmstack help") from None
         raise SystemExit(
             f"[!] action '{action}' failed to load: missing dependency '{e.name}'\n"
-            f"    hint: pip install -e . (or pipx install .) to install llmstack's deps"
+            f"    hint: pip install -e . (or pipx install .) to install opencode-llmstack's deps"
         ) from e
 
     run = getattr(module, "run", None)

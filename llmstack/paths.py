@@ -41,6 +41,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 
 AGENTS_TEMPLATE = PACKAGE_DIR / "AGENTS.md"
 MODELS_INI_TEMPLATE = PACKAGE_DIR / "models.ini"
+LITELLM_CONFIG_TEMPLATE = PACKAGE_DIR / "litellm_config.yaml"
 
 REPO_LLAMA_SWAP = "mostlygeek/llama-swap"
 ROUTER_HOST = "127.0.0.1"
@@ -172,6 +173,7 @@ class Paths:
     default_marker: Path      # <state>/default-channel
     router_pid: Path          # <state>/router.pid
     swap_pid: Path            # <state>/llama-swap.pid
+    litellm_config: Path      # <state>/lietllm_config.yaml
 
     @property
     def models_ini(self) -> Path:
@@ -201,6 +203,7 @@ def resolve() -> Paths:
         default_marker=state / "default-channel",
         router_pid=state / "router.pid",
         swap_pid=state / "llama-swap.pid",
+        litellm_config=state / "litellm_config.yaml",
     )
 
 
@@ -258,6 +261,25 @@ def ensure_models_ini() -> tuple[Path, bool]:
     import shutil as _shutil
     _shutil.copyfile(MODELS_INI_TEMPLATE, p)
     return p, True
+
+def ensure_litellm_config() -> tuple[Path, bool]:
+    """Resolve ``litellm_config.yaml``, seeding the canonical location from the
+    bundled template when nothing exists yet. Returns ``(path, seeded)``
+    where ``seeded`` is ``True`` only when we just wrote the file.
+    """
+    p = resolve()
+    if p.litellm_config.is_file():
+        return p.litellm_config, False
+    if not LITELLM_CONFIG_TEMPLATE.is_file():
+        raise SystemExit(
+            f"[!] litellm_config.yaml not found at {p.litellm_config} and no bundled template at "
+            f"{LITELLM_CONFIG_TEMPLATE}\n"
+            "    reinstall the llmstack package"
+        )
+    p.litellm_config.parent.mkdir(parents=True, exist_ok=True)
+    import shutil as _shutil
+    _shutil.copyfile(LITELLM_CONFIG_TEMPLATE, p.litellm_config)
+    return p.litellm_config, True
 
 
 # ---------------------------------------------------------------------------
