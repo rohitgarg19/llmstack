@@ -95,39 +95,39 @@ class TestBuildConfigGguf:
         assert "$schema" in self.cfg
 
     def test_provider_key(self):
-        assert "llama.cpp" in self.cfg["provider"]
+        assert "llama-swap" in self.cfg["provider"]
 
     def test_base_url_uses_ini_host_port(self):
-        url = self.cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        url = self.cfg["provider"]["llama-swap"]["options"]["baseURL"]
         assert "127.0.0.1:10101" in url
 
     def test_auto_model_present(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert "auto" in models
 
     def test_auto_ctx_equals_fast_ctx(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["auto"]["limit"]["context"] == 131072
 
     def test_auto_output_equals_fast_output(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["auto"]["limit"]["output"] == 8192
 
     def test_tier_output_limits_from_ini(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["code-fast"]["limit"]["output"] == 8192
         assert models["code-smart"]["limit"]["output"] == 32768
         assert models["plan"]["limit"]["output"] == 16384
         assert models["plan-uncensored"]["limit"]["output"] == 16384
 
     def test_small_model_wired_to_fast(self):
-        assert self.cfg["small_model"] == "llama.cpp/code-fast"
+        assert self.cfg["small_model"] == "llama-swap/code-fast"
 
     def test_build_agent_wired_to_auto(self):
-        assert self.cfg["agent"]["build"]["model"] == "llama.cpp/auto"
+        assert self.cfg["agent"]["build"]["model"] == "llama-swap/auto"
 
     def test_plan_agent_wired_to_plan_tier(self):
-        assert self.cfg["agent"]["plan"]["model"] == "llama.cpp/plan"
+        assert self.cfg["agent"]["plan"]["model"] == "llama-swap/plan"
 
     def test_plan_agent_is_read_only(self):
         perm = self.cfg["agent"]["plan"]["permission"]
@@ -137,7 +137,7 @@ class TestBuildConfigGguf:
         assert "plan-nofilter" in self.cfg["agent"]
 
     def test_all_tiers_in_models(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         for name in ("code-fast", "code-smart", "plan", "plan-uncensored"):
             assert name in models
 
@@ -156,34 +156,34 @@ class TestBuildConfigLiteLLM:
         self.cfg = build_config(ini_text=LITELLM_INI)
 
     def test_auto_ctx_equals_fast_ctx(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["auto"]["limit"]["context"] == 200000
 
     def test_auto_output_equals_fast_output(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["auto"]["limit"]["output"] == 4096
 
     def test_tier_output_limits_from_ini(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["code-fast"]["limit"]["output"] == 4096
         assert models["code-smart"]["limit"]["output"] == 16384
 
     def test_small_model_wired_to_fast(self):
-        assert self.cfg["small_model"] == "llama.cpp/code-fast"
+        assert self.cfg["small_model"] == "llama-swap/code-fast"
 
     def test_build_agent_wired_to_auto(self):
-        assert self.cfg["agent"]["build"]["model"] == "llama.cpp/auto"
+        assert self.cfg["agent"]["build"]["model"] == "llama-swap/auto"
 
 
 class TestBuildConfigRemote:
     def test_remote_url_overrides_base_url(self):
         cfg = build_config(ini_text=GGUF_INI, remote="http://10.0.0.5:10101")
-        url = cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        url = cfg["provider"]["llama-swap"]["options"]["baseURL"]
         assert url == "http://10.0.0.5:10101/v1"
 
     def test_local_url_used_when_no_remote(self):
         cfg = build_config(ini_text=GGUF_INI, remote=None)
-        url = cfg["provider"]["llama.cpp"]["options"]["baseURL"]
+        url = cfg["provider"]["llama-swap"]["options"]["baseURL"]
         assert "127.0.0.1:10101" in url
 
 
@@ -276,23 +276,23 @@ class TestOutputLimitFallbacks:
         self.cfg = build_config(ini_text=_NO_OUTPUT_TOKENS_INI)
 
     def test_auto_output_falls_back_to_16384(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["auto"]["limit"]["output"] == 16384
 
     def test_agent_output_falls_back_to_32768(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["code-smart"]["limit"]["output"] == 32768
 
     def test_fast_output_falls_back_to_8192(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["code-fast"]["limit"]["output"] == 8192
 
     def test_plan_uncensored_output_falls_back_to_32768(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["plan-uncensored"]["limit"]["output"] == 32768
 
     def test_plan_output_falls_back_to_8192(self):
-        models = self.cfg["provider"]["llama.cpp"]["models"]
+        models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["plan"]["limit"]["output"] == 8192
 
 
