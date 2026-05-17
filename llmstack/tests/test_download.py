@@ -45,10 +45,11 @@ class TestIterDownloadTargets:
             delete=False,
         ) as f:
             f.write("[plan]\n")
-            f.write("aws_model_id = us.anthropic.claude-3-5-sonnet\n")
-            f.write("role = chat\n")
+            f.write("backend = litellm\n")
+            f.write("model = bedrock/eu.anthropic.claude-3-5-sonnet\n")
+            f.write("role = plan\n")
             f.write("description = Plan mode\n")
-            f.write("ctx_size = 64000\n")
+            f.write("ctx_size = 200000\n")
             path = Path(f.name)
 
         try:

@@ -233,7 +233,7 @@ def run(args: list[str]) -> int:
         queued = _queued_next_tiers()
         if not queued:
             print(
-                "[!] no tiers have hf_file_next or aws_model_id_next set in models.ini -- "
+                "[!] no tiers have hf_file_next or model_next set in models.ini -- "
                 "nothing to do.",
                 file=sys.stderr,
             )
@@ -273,7 +273,7 @@ def run(args: list[str]) -> int:
         # (host / router_port) + paths.SWAP_PORT, so no env handoff is
         # needed here apart from the channel marker below.
         # Lock-step with the gguf --use-next swap: litellm tiers in the
-        # router pick aws_model_id_next when this flag is set.
+        # router pick model_next when this flag is set.
         if channel == "next":
             env["LLMSTACK_USE_NEXT"] = "1"
         else:
