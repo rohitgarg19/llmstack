@@ -232,15 +232,7 @@ def spawn_subshell(channel: str) -> None:
         "LLMSTACK_CHANNEL": channel,
         "LLMSTACK_ACTIVE": "1",
         "LLMSTACK_ROOT": str(PACKAGE_DIR),
-        # CONFIG_FILE_PATH is the env var litellm reads to pick up its
-        # config without needing `--config` on the CLI -- so a user who
-        # types `litellm` inside this shell starts pointed at the
-        # project's litellm_config.yaml automatically.
         "CONFIG_FILE_PATH": str(paths.litellm_config),
-        # LITELLM_MASTER_KEY is required by the litellm proxy when
-        # api_key auth is enabled; set a fixed value so the router and
-        # any in-shell litellm calls agree on the key without extra config.
-        "LITELLM_MASTER_KEY": "llmstack",
     })
     if rurl:
         env["LLMSTACK_REMOTE_URL"] = rurl
@@ -384,7 +376,7 @@ _llmstack_warn_optional() {
 
 _llmstack_deactivate() {
     if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH LITELLM_MASTER_KEY
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH
         if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
             PROMPT="$_LLMSTACK_PS1_BACKUP"
             unset _LLMSTACK_PS1_BACKUP
@@ -441,7 +433,6 @@ _llmstack_activate() {
     # CLI; export it so `litellm` started from this shell finds the
     # project's config automatically.
     export CONFIG_FILE_PATH="$found/.llmstack/litellm_config.yaml"
-    export LITELLM_MASTER_KEY="llmstack"
     if [[ "$_ch" == "external" && -n "$_url" ]]; then
         export LLMSTACK_REMOTE_URL="$_url"
     else
@@ -588,7 +579,7 @@ _llmstack_warn_optional() {
 
 _llmstack_deactivate() {
     if [[ -n "${LLMSTACK_WORK_DIR:-}" ]]; then
-        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH LITELLM_MASTER_KEY
+        unset OPENCODE_CONFIG LLMSTACK_WORK_DIR LLMSTACK_ACTIVE LLMSTACK_CHANNEL LLMSTACK_REMOTE_URL CONFIG_FILE_PATH
         if [[ -n "${_LLMSTACK_PS1_BACKUP:-}" ]]; then
             PS1="$_LLMSTACK_PS1_BACKUP"
             unset _LLMSTACK_PS1_BACKUP
@@ -640,7 +631,6 @@ _llmstack_activate() {
     # makes a bare `litellm` invocation in this shell start with the
     # project's config.
     export CONFIG_FILE_PATH="$found/.llmstack/litellm_config.yaml"
-    export LITELLM_MASTER_KEY="llmstack"
     if [[ "$_ch" == "external" && -n "$_url" ]]; then
         export LLMSTACK_REMOTE_URL="$_url"
     else
@@ -828,7 +818,6 @@ function global:_LlmstackDeactivate {
         Remove-Item Env:LLMSTACK_CHANNEL    -ErrorAction SilentlyContinue
         Remove-Item Env:LLMSTACK_REMOTE_URL -ErrorAction SilentlyContinue
         Remove-Item Env:CONFIG_FILE_PATH    -ErrorAction SilentlyContinue
-        Remove-Item Env:LITELLM_MASTER_KEY  -ErrorAction SilentlyContinue
         $global:_LLMSTACK_PROMPT_ON = $false
     }
     Remove-Item Env:_LLMSTACK_WARNED_FOR -ErrorAction SilentlyContinue
@@ -868,7 +857,6 @@ function global:_LlmstackActivate {
     # makes a bare `litellm` invocation in this shell start with the
     # project's config.
     $env:CONFIG_FILE_PATH  = Join-Path $found ".llmstack/litellm_config.yaml"
-    $env:LITELLM_MASTER_KEY = "llmstack"
     if ($channel -eq "external" -and $marker.url) {
         $env:LLMSTACK_REMOTE_URL = $marker.url
     } else {
