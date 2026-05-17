@@ -46,7 +46,6 @@ from llmstack.paths import ensure_litellm_config
 from llmstack.tiers import load_tiers
 
 
-
 def _desired_entries() -> list[dict[str, Any]]:
     """Walk :func:`load_tiers` and emit a stub per litellm tier (+ _next)."""
     out: list[dict[str, Any]] = []

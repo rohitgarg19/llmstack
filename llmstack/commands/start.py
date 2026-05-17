@@ -302,7 +302,7 @@ def run(args: list[str]) -> int:
     print(f'  router       http://127.0.0.1:{ROUTER_PORT}     (OpenAI-compatible, "auto" routing)')
     print(f"  llama-swap   http://127.0.0.1:{SWAP_PORT}     (raw model endpoints + UI)")
     if has_litellm:
-        print(f"  litellm      http://127.0.0.1:10103          (proxy / dashboard /ui / MCP gateway /mcp)")
+        print("  litellm      http://127.0.0.1:10103          (proxy / dashboard /ui / MCP gateway /mcp)")
     print()
     print("Try:")
     print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/v1/models | jq '.data[].id'")

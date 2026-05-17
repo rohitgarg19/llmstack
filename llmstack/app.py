@@ -119,7 +119,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from llmstack.paths import models_ini_path
+from llmstack.paths import SWAP_PORT, models_ini_path
 from llmstack.tiers import (
     Tier,
     load_router_endpoint,
@@ -133,7 +133,7 @@ from llmstack.tiers import (
 # var fallbacks -- if you need to point at a different llama-swap, edit
 # models.ini and re-run ``llmstack install``.
 _ENDPOINT = load_router_endpoint()
-from llmstack.paths import SWAP_PORT
+
 UPSTREAM = f"http://{_ENDPOINT.host}:{SWAP_PORT}"
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
