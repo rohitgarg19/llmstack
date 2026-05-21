@@ -101,7 +101,35 @@ def _instructions_paths() -> list[str]:
     return [p for p in raw.split(":") if p]
 
 
-def _mcp_block(remote: str | None) -> dict[str, dict]:
+def _has_litellm_tier(cfg: configparser.ConfigParser) -> bool:
+    """True when any non-ROUTING section declares a litellm backend.
+
+    Mirrors :func:`llmstack.tiers._detect_backend` without instantiating
+    the full Tier dataclass: a section is litellm-backed when
+    ``backend = litellm`` is set explicitly, or when ``model = ...`` is
+    set (the implicit-litellm convention). Used to decide whether the
+    litellm proxy will actually be running on
+    ``LITELLM_PROXY_PORT`` (llama-swap only spawns the proxy entry when
+    there's at least one litellm tier, see
+    :func:`llmstack.generators.llama_swap.build_models_block`).
+    """
+    for section in cfg.sections():
+        if section == "ROUTING":
+            continue
+        s = cfg[section]
+        backend = (s.get("backend") or "").strip()
+        if backend == "litellm":
+            return True
+        if not backend and (s.get("model") or "").strip():
+            return True
+    return False
+
+
+def _mcp_block(
+    remote: str | None,
+    *,
+    has_litellm: bool = False,
+) -> dict[str, dict]:
     """Mirror ``mcp_servers`` from ``litellm_config.yaml`` into opencode.
 
     Reads the per-project litellm yaml, extracts each entry under
@@ -116,36 +144,58 @@ def _mcp_block(remote: str | None) -> dict[str, dict]:
     so the remote llmstack's litellm proxy answers. Local installs
     use ``http://127.0.0.1:LITELLM_PROXY_PORT``.
 
-    Empty / missing yaml, missing ``mcp_servers`` key, or PyYAML
-    not importable all yield an empty dict (no ``mcp`` key in
-    opencode.json).
-    """
-    try:
-        import yaml
-    except ImportError:
-        return {}
-    try:
-        path = resolve().litellm_config
-    except Exception:
-        return {}
-    if not path.is_file():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (yaml.YAMLError, OSError):
-        return {}
-    servers = data.get("mcp_servers") if isinstance(data, dict) else None
-    if not isinstance(servers, dict) or not servers:
-        return {}
+    Additionally, when ``has_litellm`` is True (i.e. ``models.ini``
+    declares at least one ``backend = litellm`` tier, which is what
+    causes llama-swap to spawn the proxy), an entry named ``litellm``
+    is emitted pointing at the proxy's ``/mcp`` gateway root. That
+    single connection exposes every fan-out tool the proxy aggregates
+    (whether or not the user has populated ``mcp_servers`` in
+    ``litellm_config.yaml``), giving opencode tool access to the
+    proxy's MCP gateway as soon as the litellm server is up.
 
+    Empty / missing yaml, missing ``mcp_servers`` key, or PyYAML
+    not importable still yield the ``litellm`` gateway entry when
+    ``has_litellm`` is True; otherwise the result is an empty dict
+    (no ``mcp`` key in opencode.json).
+    """
     if remote:
         base = f"{remote.rstrip('/')}/mcp"
     else:
         base = f"http://127.0.0.1:{LITELLM_PROXY_PORT}/mcp"
 
     out: dict[str, dict] = {}
+
+    if has_litellm:
+        out["litellm"] = {
+            "type": "remote",
+            "url": base,
+            "enabled": True,
+        }
+
+    try:
+        import yaml
+    except ImportError:
+        return out
+    try:
+        path = resolve().litellm_config
+    except Exception:
+        return out
+    if not path.is_file():
+        return out
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return out
+    servers = data.get("mcp_servers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        return out
+
     for name, entry in servers.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        if name == "litellm":
+            # Don't let a user-defined mcp_servers entry shadow the
+            # gateway entry we just added (and vice-versa).
             continue
         # Honour stdio MCP servers transparently: opencode supports
         # type=local for those, but the litellm proxy is already
@@ -227,7 +277,7 @@ def build_config(
         # appears in opencode.json.
         base_url = f"{rurl}/v1"
     else:
-        host     = (defaults.get("host") or "127.0.0.1").strip()
+        host     = (defaults.get("router_host") or "127.0.0.1").strip()
         port     = (defaults.get("router_port") or "10101").strip()
         base_url = f"http://{host}:{port}/v1"
 
@@ -351,7 +401,7 @@ def build_config(
         for name, spec in COMMANDS.items()
         if not spec.get("agent") or spec.get("agent") in agents
     }
-    mcp = _mcp_block(rurl)
+    mcp = _mcp_block(rurl, has_litellm=_has_litellm_tier(cfg))
     if mcp:
         out["mcp"] = mcp
     return out

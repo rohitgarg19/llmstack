@@ -112,7 +112,7 @@ class RoutingConfig:
 
 @dataclass(frozen=True)
 class RouterEndpoint:
-    """``host`` + ``router_port`` parsed from ``[DEFAULT]`` in models.ini.
+    """``router_host`` + ``router_port`` parsed from ``[DEFAULT]`` in models.ini.
 
     The router (this process) binds to these and downstream consumers
     (opencode, the activate hook's ``OPENAI_BASE_URL``, ...) point at
@@ -376,7 +376,7 @@ def load_routing(ini_path: Path | None = None) -> RoutingConfig:
 
 
 def load_router_endpoint(ini_path: Path | None = None) -> RouterEndpoint:
-    """Parse ``host`` + ``router_port`` from ``[DEFAULT]`` in models.ini.
+    """Parse ``router_host`` + ``router_port`` from ``[DEFAULT]`` in models.ini.
 
     Missing file or missing keys fall back to the
     :class:`RouterEndpoint` defaults so a fresh / partial ini still
@@ -393,7 +393,7 @@ def load_router_endpoint(ini_path: Path | None = None) -> RouterEndpoint:
     )
     cfg.read(path)
     defaults = cfg["DEFAULT"]
-    host = _strip(defaults.get("host")) or RouterEndpoint.host
+    host = _strip(defaults.get("router_host")) or RouterEndpoint.host
     port_raw = _strip(defaults.get("router_port"))
     port = _int(port_raw, RouterEndpoint.router_port) if port_raw else RouterEndpoint.router_port
     return RouterEndpoint(host=host, router_port=port)

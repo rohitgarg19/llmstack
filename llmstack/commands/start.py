@@ -42,6 +42,7 @@ channels exist:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
@@ -57,15 +58,37 @@ from llmstack.paths import (
     SWAP_PORT,
     ChannelMark,
     ensure_state_dirs,
+    models_ini_path,
     read_marker,
     write_marker,
 )
 from llmstack.shell_env import spawn_subshell
-from llmstack.tiers import load_tiers
+from llmstack.tiers import load_router_endpoint, load_tiers
 
 
 def _print_help() -> None:
-    print("usage: llmstack start [--detach]")
+    print("usage: llmstack start [--detach] [--host HOST] [--port PORT]")
+    print()
+    print("  --host HOST   address the router listens on (default: from models.ini)")
+    print("  --port PORT   port the router listens on (default: from models.ini)")
+    print("  --detach      start daemons and exit without spawning a subshell")
+
+
+def _persist_ini_defaults(host: str | None, port: int | None) -> None:
+    """Update router_host/router_port in [DEFAULT] of models.ini so future starts reuse them."""
+    path = models_ini_path()
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    if host is not None:
+        text = re.sub(
+            r"^(router_host\s*=\s*).*$", rf"\g<1>{host}", text, count=1, flags=re.MULTILINE
+        )
+    if port is not None:
+        text = re.sub(
+            r"^(router_port\s*=\s*).*$", rf"\g<1>{port}", text, count=1, flags=re.MULTILINE
+        )
+    path.write_text(text, encoding="utf-8")
 
 
 def _queued_next_tiers() -> list[str]:
@@ -147,20 +170,53 @@ def _start_remote(detach: bool, url: str) -> int:
 
 def run(args: list[str]) -> int:
     detach = False
-    for arg in args:
+    host_override: str | None = None
+    port_override: int | None = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
         if arg in ("--detach", "--no-shell"):
             detach = True
         elif arg in ("-h", "--help"):
             _print_help()
             return 0
+        elif arg == "--host":
+            if i + 1 >= len(args):
+                print("[!] --host requires an argument", file=sys.stderr)
+                return 2
+            i += 1
+            host_override = args[i]
+        elif arg.startswith("--host="):
+            host_override = arg.split("=", 1)[1]
+        elif arg == "--port":
+            if i + 1 >= len(args):
+                print("[!] --port requires an argument", file=sys.stderr)
+                return 2
+            i += 1
+            try:
+                port_override = int(args[i])
+            except ValueError:
+                print(f"[!] --port: invalid integer: {args[i]}", file=sys.stderr)
+                return 2
+        elif arg.startswith("--port="):
+            val = arg.split("=", 1)[1]
+            try:
+                port_override = int(val)
+            except ValueError:
+                print(f"[!] --port: invalid integer: {val}", file=sys.stderr)
+                return 2
         else:
-            print(f"[!] unknown arg to start: {arg} (try --detach, -h)")
+            print(f"[!] unknown arg to start: {arg} (try --detach, --host, --port, -h)")
             print(
                 "    note: --current / --next belong to `llmstack install` -- "
                 "the channel is pinned at install time and start just honours it.",
                 file=sys.stderr,
             )
             return 2
+        i += 1
+
+    if host_override or port_override:
+        _persist_ini_defaults(host_override, port_override)
 
     paths = ensure_state_dirs()
     default = read_marker(paths.default_marker)
@@ -267,19 +323,21 @@ def run(args: list[str]) -> int:
             return 1
         print(f"    pid {read_pid(paths.swap_pid)}")
 
-        print(f"[*] starting router on :{ROUTER_PORT}")
+        print(f"[*] starting router on :{port_override or ROUTER_PORT}")
         env = os.environ.copy()
-        # Router reads its bind host/port + upstream from models.ini
-        # (host / router_port) + paths.SWAP_PORT, so no env handoff is
-        # needed here apart from the channel marker below.
         # Lock-step with the gguf --use-next swap: litellm tiers in the
         # router pick model_next when this flag is set.
         if channel == "next":
             env["LLMSTACK_USE_NEXT"] = "1"
         else:
             env.pop("LLMSTACK_USE_NEXT", None)
+        router_cmd = [sys.executable, "-m", "llmstack.app"]
+        if host_override:
+            router_cmd += ["--host", host_override]
+        if port_override:
+            router_cmd += ["--port", str(port_override)]
         spawn_daemon(
-            [sys.executable, "-m", "llmstack.app"],
+            router_cmd,
             log=paths.log_dir / "router.log",
             pid_file=paths.router_pid,
             env=env,
@@ -296,17 +354,20 @@ def run(args: list[str]) -> int:
             print(f"[=] router already running (pid {read_pid(paths.router_pid)})")
 
     other = "next" if channel == "current" else "current"
+    _ep = load_router_endpoint()
+    router_host = host_override or _ep.host
+    router_port = port_override or _ep.router_port
     print()
     print(f"[OK] stack is up (channel: {channel}).")
     print()
-    print(f'  router       http://127.0.0.1:{ROUTER_PORT}     (OpenAI-compatible, "auto" routing)')
+    print(f'  router       http://{router_host}:{router_port}     (OpenAI-compatible, "auto" routing)')
     print(f"  llama-swap   http://127.0.0.1:{SWAP_PORT}     (raw model endpoints + UI)")
     if has_litellm:
         print("  litellm      http://127.0.0.1:10103          (proxy / dashboard /ui / MCP gateway /mcp)")
     print()
     print("Try:")
-    print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/v1/models | jq '.data[].id'")
-    print(f"  curl -s http://127.0.0.1:{ROUTER_PORT}/models.ini | head")
+    print(f"  curl -s http://{router_host}:{router_port}/v1/models | jq '.data[].id'")
+    print(f"  curl -s http://{router_host}:{router_port}/models.ini | head")
     print()
     print("Logs:")
     print(f"  tail -f {paths.log_dir}/llama-swap.log")

@@ -187,7 +187,7 @@ def is_truthy(raw: str | None, default: bool = True) -> bool:
 def build_metal_defaults(d) -> str:
     """The shared llama-server flags used by every model."""
     parts = [
-        f"--host {(d.get('host') or '127.0.0.1').strip()}",
+        "--host 127.0.0.1",
         "--port ${PORT}",
         f"-ngl {(d.get('n_gpu_layers') or '999').strip()}",
         f"-fa {(d.get('flash_attn') or 'on').strip()}",

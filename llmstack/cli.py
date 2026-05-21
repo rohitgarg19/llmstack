@@ -77,7 +77,7 @@ Actions:
       Download every GGUF named in models.ini (current + queued next) to
       the standard llama.cpp cache, in parallel, in the background.
 
-  start [--detach]
+  start [--detach] [--host HOST] [--port PORT]
       Bring up llama-swap (:10102) + auto-router (:10101) using the
       .llmstack/llama-swap.yaml that `install` wrote. Channel is
       whatever `install` pinned (else `current`); selection is an
@@ -85,6 +85,16 @@ Actions:
       --next and does not regenerate the yaml. To change channels or
       pick up models.ini edits: `llmstack install [--current|--next]`
       then `llmstack restart`.
+
+      --host HOST overrides the address the router listens on (default
+      from models.ini, typically 127.0.0.1). Use 0.0.0.0 to expose on
+      all interfaces.
+
+      --port PORT overrides the router port (default from models.ini,
+      typically 10101).
+
+      Both --host and --port are persisted to models.ini so subsequent
+      starts reuse them without re-specifying.
 
       Subshell behaviour: if LLMSTACK_ACTIVE is already set (i.e. the
       activate hook has wired this shell up) `start` just brings up

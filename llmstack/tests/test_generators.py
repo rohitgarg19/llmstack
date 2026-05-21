@@ -9,7 +9,7 @@ from llmstack.paths import MODELS_INI_TEMPLATE
 
 GGUF_INI = """
 [DEFAULT]
-host         = 127.0.0.1
+router_host  = 127.0.0.1
 router_port  = 10101
 
 [code-fast]
@@ -60,7 +60,7 @@ multi_turn            = 10
 
 LITELLM_INI = """
 [DEFAULT]
-host        = 127.0.0.1
+router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]
@@ -174,6 +174,35 @@ class TestBuildConfigLiteLLM:
     def test_build_agent_wired_to_auto(self):
         assert self.cfg["agent"]["build"]["model"] == "llama-swap/auto"
 
+    def test_litellm_mcp_entry_present(self):
+        # Any backend=litellm tier means llama-swap will start the
+        # litellm proxy; opencode should get an mcp.litellm entry
+        # pointed at the proxy's /mcp gateway.
+        mcp = self.cfg.get("mcp", {})
+        assert "litellm" in mcp
+        assert mcp["litellm"]["type"] == "remote"
+        assert mcp["litellm"]["url"].endswith("/mcp")
+        assert mcp["litellm"]["enabled"] is True
+
+    def test_litellm_mcp_uses_local_proxy_port(self):
+        url = self.cfg["mcp"]["litellm"]["url"]
+        assert url == "http://127.0.0.1:10103/mcp"
+
+
+class TestLiteLLMMcpRemote:
+    def test_litellm_mcp_uses_remote_base(self):
+        cfg = build_config(ini_text=LITELLM_INI, remote="http://10.0.0.5:10101")
+        assert cfg["mcp"]["litellm"]["url"] == "http://10.0.0.5:10101/mcp"
+
+
+class TestNoLiteLLMNoMcpEntry:
+    def test_litellm_mcp_absent_for_pure_gguf(self):
+        cfg = build_config(ini_text=GGUF_INI)
+        # Pure-gguf install: no litellm proxy will run, so no
+        # mcp.litellm entry should be emitted. opencode.json may
+        # legitimately have no `mcp` key at all.
+        assert "litellm" not in cfg.get("mcp", {})
+
 
 class TestBuildConfigRemote:
     def test_remote_url_overrides_base_url(self):
@@ -189,7 +218,7 @@ class TestBuildConfigRemote:
 
 _NO_PLAN_UNCENSORED_INI = """
 [DEFAULT]
-host        = 127.0.0.1
+router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]
@@ -234,7 +263,7 @@ class TestNoPlanUncensoredTier:
 
 _NO_OUTPUT_TOKENS_INI = """
 [DEFAULT]
-host        = 127.0.0.1
+router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]

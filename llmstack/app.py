@@ -128,13 +128,11 @@ from llmstack.tiers import (
     tier_name_for_role,
 )
 
-# Router endpoint and upstream URL come from models.ini ``[DEFAULT]``
-# (host / router_port) plus :data:`llmstack.paths.SWAP_PORT`. No env
-# var fallbacks -- if you need to point at a different llama-swap, edit
-# models.ini and re-run ``llmstack install``.
+# Router endpoint comes from models.ini ``[DEFAULT]`` (router_host /
+# router_port). Upstream llama-swap always binds to 127.0.0.1.
 _ENDPOINT = load_router_endpoint()
 
-UPSTREAM = f"http://{_ENDPOINT.host}:{SWAP_PORT}"
+UPSTREAM = f"http://127.0.0.1:{SWAP_PORT}"
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
 
@@ -685,14 +683,35 @@ async def passthrough(path: str, req: Request) -> Response:
 def main() -> None:
     """Run the router with uvicorn. Used by ``python -m llmstack.app``."""
     import asyncio
+    import sys as _sys
 
     import uvicorn
+
+    host = _ENDPOINT.host
+    port = _ENDPOINT.router_port
+    argv = _sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--host" and i + 1 < len(argv):
+            host = argv[i + 1]
+            i += 2
+        elif argv[i].startswith("--host="):
+            host = argv[i].split("=", 1)[1]
+            i += 1
+        elif argv[i] == "--port" and i + 1 < len(argv):
+            port = int(argv[i + 1])
+            i += 2
+        elif argv[i].startswith("--port="):
+            port = int(argv[i].split("=", 1)[1])
+            i += 1
+        else:
+            i += 1
 
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     cfg = uvicorn.Config(
         app,
-        host=_ENDPOINT.host,
-        port=_ENDPOINT.router_port,
+        host=host,
+        port=port,
         log_level=log_level,
     )
     asyncio.run(uvicorn.Server(cfg).serve())
