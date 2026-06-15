@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from llmstack._platform import detached_popen, find_pids
+from llmstack._platform import detached_popen, popen, find_pids
 from llmstack.paths import ensure_state_dirs, require_models_ini, resolve
 from llmstack.tiers import iter_download_targets, load_tiers
 
@@ -51,6 +51,27 @@ def _find_llama_bin() -> str:
         "[!] neither llama-completion nor llama-cli found in PATH "
         "(brew install llama.cpp)"
     )
+
+def _check_cache(llama_bin: str, repo: str, quant: str) -> bool:
+    """Check if the given repo/file is already cached by llama.cpp.
+
+    Uses ``llama-cli -cl`` to list cache entries and looks for a match on
+    the repo+file. Returns True if found, False otherwise.
+    """
+    try:
+        proc = popen([llama_bin, "-cl"])
+        proc.wait()
+        output = proc.stdout.read().decode()
+    except Exception as e:
+        print(f"[!] failed to check cache with {llama_bin} -cl: {e}", file=sys.stderr)
+        return False
+
+    target = f"{repo}:{quant}"
+    for line in output.splitlines():
+        if target in line:
+            return True
+    return False
+
 
 
 def _spawn(llama_bin: str, repo: str, file: str, log: Path, hf_token: str | None) -> int:
@@ -110,6 +131,8 @@ def download_all() -> list[DownloadJob]:
 
     jobs: list[DownloadJob] = []
     for tf in targets:
+        if _check_cache(llama_bin, tf.repo, tf.quant):  # best-effort pre-check to avoid redundant downloads; not a blocker
+            continue
         log = paths.log_dir / f"dl-{tf.tag}.log"
         print(f"[*] {tf.tag:<32} ({tf.label:<7}) {tf.repo} / {tf.file}")
         print(f"    log -> {log}")

@@ -7,7 +7,6 @@ Edits files directly to implement changes.
 - Edit files directly when implementing changes
 - Provide clear, actionable steps with file paths and line numbers
 - Explain *why* each change is needed, not just *what*
-- Keep responses concise — under 1000 tokens
 - Skip `.llmstack/` during search and reads — it's generated runtime state
 - Only look there if the user explicitly points you at it
 

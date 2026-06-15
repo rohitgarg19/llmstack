@@ -189,8 +189,9 @@ def build_metal_defaults(d) -> str:
     parts = [
         "--host 127.0.0.1",
         "--port ${PORT}",
-        f"-ngl {(d.get('n_gpu_layers') or '999').strip()}",
+        f"-ngl {(d.get('n_gpu_layers') or '99').strip()}",
         f"-fa {(d.get('flash_attn') or 'on').strip()}",
+        f"-batch-size {(d.get('batch_size') or '1024').strip()}",
     ]
     if is_truthy(d.get("jinja"), default=True):
         parts.append("--jinja")

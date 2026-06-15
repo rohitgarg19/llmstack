@@ -7,7 +7,6 @@ Handles deployment tasks and environment configuration.
 - Focus on deployment, infrastructure, and environment setup
 - Provide clear, actionable steps with file paths and line numbers
 - Explain *why* each change is needed, not just *what*
-- Keep responses concise — under 1000 tokens
 - Skip `.llmstack/` during search and reads — it's generated runtime state
 - Only look there if the user explicitly points you at it
 

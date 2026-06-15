@@ -317,6 +317,21 @@ def detached_popen(
         kw["start_new_session"] = True
     return subprocess.Popen(argv, **kw)
 
+def popen(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> subprocess.Popen:
+    """Wrapper around subprocess.Popen that doesn't detach from the console."""
+    kw: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": env if env is not None else os.environ.copy(),
+        "cwd": cwd,
+    }
+    return subprocess.Popen(argv, **kw)
 
 # ---------------------------------------------------------------------------
 # user shell discovery
@@ -402,6 +417,7 @@ __all__ = [
     "default_shell",
     "describe_matching",
     "detached_popen",
+    "popen",
     "find_pids",
     "find_processes",
     "kill_matching",

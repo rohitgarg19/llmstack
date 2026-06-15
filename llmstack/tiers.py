@@ -134,6 +134,7 @@ class TierFile:
     label: str      # "current" or "next"
     repo: str       # HuggingFace repo (owner/name)
     file: str       # GGUF filename inside that repo
+    quant: str      # quantization config (e.g. "q4_0", "q5_1", or "" for default)
 
     @property
     def tag(self) -> str:
@@ -202,8 +203,10 @@ class Tier:
     ctx_size: int
     repo: str = ""
     file: str = ""
+    quant: str = ""
     repo_next: str | None = None
     file_next: str | None = None
+    quant_next: str | None = None
     litellm: LiteLLMConfig | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
     sampler: dict[str, float] = field(default_factory=dict)
@@ -213,11 +216,11 @@ class Tier:
         """Return the GGUF download targets for this tier (empty for non-gguf)."""
         if self.backend != BACKEND_GGUF or not (self.repo and self.file):
             return []
-        out = [TierFile(self.name, self.role, "current", self.repo, self.file)]
-        if self.file_next:
+        out = [TierFile(self.name, self.role, "current", self.repo, self.file, self.quant)]
+        if self.file_next != None and self.quant_next != None:
             out.append(TierFile(
                 self.name, self.role, "next",
-                self.repo_next or self.repo, self.file_next,
+                self.repo_next or self.repo, self.file_next, self.quant_next
             ))
         return out
 
@@ -321,7 +324,9 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
                 **common,
                 repo=_strip(s.get("hf_repo")),
                 file=_strip(s.get("hf_file")),
+                quant=_strip(s.get("quant")),
                 repo_next=_strip(s.get("hf_repo_next")) or None,
+                quant_next=_strip(s.get("quant_next")) or None,
                 file_next=_strip(s.get("hf_file_next")) or None,
                 max_output_tokens=_int(s.get("max_output_tokens", "")) or None,
             )
