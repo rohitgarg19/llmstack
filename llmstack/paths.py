@@ -39,7 +39,10 @@ from llmstack._platform import EXE_SUFFIX, user_data_root
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-AGENTS_TEMPLATE = PACKAGE_DIR / "AGENTS.md"
+AGENTS_TEMPLATE = PACKAGE_DIR / "agents/plan.md"
+AGENTS_TEMPLATE_NOFILTER = PACKAGE_DIR / "agents/plan-nofilter.md"
+AGENTS_TEMPLATE_BUILD = PACKAGE_DIR / "agents/build.md"
+AGENTS_TEMPLATE_DEPLOY = PACKAGE_DIR / "agents/deploy.md"
 MODELS_INI_TEMPLATE = PACKAGE_DIR / "models.ini"
 LITELLM_CONFIG_TEMPLATE = PACKAGE_DIR / "litellm_config.yaml"
 

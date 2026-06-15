@@ -379,7 +379,13 @@ def build_config(
     if DISABLED_PROVIDERS:
         out["disabled_providers"] = DISABLED_PROVIDERS
 
-    instructions = _instructions_paths()
+    # Resolve agent instructions from project-specific files
+    instructions = []
+    for agent_name in ["plan", "plan-nofilter", "build", "deploy"]:
+        path = Path(os.environ.get("OPENCODE_INSTRUCTIONS", str(AGENTS_TEMPLATE))).parent / f"{agent_name}.md"
+        if path.is_file():
+            instructions.append(str(path))
+    
     if instructions:
         out["instructions"] = instructions
 

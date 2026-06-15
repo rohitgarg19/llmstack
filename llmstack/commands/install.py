@@ -47,6 +47,9 @@ from llmstack.generators.opencode import render as render_opencode
 from llmstack.generators.opencode import validate as validate_opencode
 from llmstack.paths import (
     AGENTS_TEMPLATE,
+    AGENTS_TEMPLATE_NOFILTER,
+    AGENTS_TEMPLATE_BUILD,
+    AGENTS_TEMPLATE_DEPLOY,
     DEFAULT_REMOTE_URL,
     ChannelMark,
     ensure_litellm_config,
@@ -342,12 +345,22 @@ def run(args: list[str]) -> int:
         return 0
 
     print("[1/2] AGENTS.md")
-    if AGENTS_TEMPLATE.is_file():
-        shutil.copyfile(AGENTS_TEMPLATE, paths.agents_local)
-        os.chmod(paths.agents_local, 0o644)
-        print(f"[OK] copied AGENTS.md -> {paths.agents_local}")
-    else:
-        print(f"[!] AGENTS.md template not found at {AGENTS_TEMPLATE}; skipping copy")
+    # Copy agent templates to project
+    templates = [
+        (AGENTS_TEMPLATE, "plan"),
+        (AGENTS_TEMPLATE_NOFILTER, "plan-nofilter"),
+        (AGENTS_TEMPLATE_BUILD, "build"),
+        (AGENTS_TEMPLATE_DEPLOY, "deploy")
+    ]
+    
+    for template_path, agent_name in templates:
+        if template_path.is_file():
+            target_path = paths.agents_local.parent / f"{agent_name}.md"
+            shutil.copyfile(template_path, target_path)
+            os.chmod(target_path, 0o644)
+            print(f"[OK] copied {agent_name}.md -> {target_path}")
+        else:
+            print(f"[!] {agent_name}.md template not found at {template_path}; skipping copy")
 
     print()
     print("[2/2] opencode.json")
