@@ -76,10 +76,6 @@ Routing decision tree (first match wins):
   4. Otherwise (long context, top-tier becomes
      expensive/slow, fast tier's 128k window is the
      best fit and it's free)                          -> code-fast
-                                                         (floored at
-                                                          code-smart when
-                                                          n_turns >=
-                                                          MULTI_TURN_THRESHOLD)
 
 Plan and uncensored tiers are accessible via their dedicated agent
 modes (``agent.plan``, ``agent.plan-nofilter``) and slash commands;
@@ -174,12 +170,10 @@ ULTRA_MODEL = tier_name_for_role("ultra") or "code-ultra"
 #                still has comfortable headroom.
 #
 # Source of truth: models.ini ``[ROUTING]`` (high_fidelity_ceiling,
-# mid_fidelity_ceiling, multi_turn). No env-var overrides -- edit the
 # ini and re-run ``llmstack install`` to change these.
 _ROUTING = load_routing()
 HIGH_FIDELITY_CEILING = _ROUTING.high_fidelity_ceiling
 MID_FIDELITY_CEILING = _ROUTING.mid_fidelity_ceiling
-MULTI_TURN_THRESHOLD = _ROUTING.multi_turn
 AUTO_ALIASES = {"auto", "", None}
 
 ULTRA_TRIGGERS = re.compile(
@@ -344,10 +338,7 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
     if est <= MID_FIDELITY_CEILING:
         return AGENT_MODEL, f"mid-fidelity tokens~{est}<={MID_FIDELITY_CEILING}"
 
-    # Rung 3: long context -- step down to fast. Floor at smart only
-    # when the multi-turn threshold is hit.
-    if n_turns >= MULTI_TURN_THRESHOLD:
-        return AGENT_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING} (user-turns={n_turns}>={MULTI_TURN_THRESHOLD} floor)"
+    # Rung 3: long context -- step down to fast.
     return FAST_MODEL, f"long-context tokens~{est}>{MID_FIDELITY_CEILING}"
 
 
@@ -503,52 +494,6 @@ def _resolve_tier(name: str | None) -> Tier | None:
     return TIER_BY_ALIAS.get(name)
 
 
-# Map the short sampler keys used in models.ini to the OpenAI-compatible
-# request-body fields that downstream backends understand. llama.cpp
-# accepts `top_k`, `min_p`, and `repetition_penalty` as extensions; the
-# litellm backend ignores fields it can't translate to Converse.
-_SAMPLER_BODY_FIELD = {
-    "temp":    "temperature",
-    "top_p":   "top_p",
-    "top_k":   "top_k",
-    "min_p":   "min_p",
-    "rep_pen": "repetition_penalty",
-}
-
-
-def _inject_sampler(body: dict[str, Any], tier: Tier) -> bool:
-    """Layer this tier's `sampler = ...` defaults onto the request body.
-
-    **LiteLLM-only.** For gguf tiers, sampling defaults are baked into
-    the llama-server startup command line by
-    :mod:`llmstack.generators.llama_swap`, so llama-server already
-    applies them for any request whose body lacks an explicit value.
-    LiteLLM has no equivalent server-side mechanism -- the only place to
-    apply per-tier sampling for remote models is the outbound request
-    body, which is what this function does.
-
-    Caller-supplied values always win -- if the client already set
-    `temperature`, the tier default does not overwrite it. This makes
-    models.ini the source of truth for "what sampler does each tier
-    use", while still letting power users override per call.
-
-    Returns ``True`` iff anything was added (the caller re-encodes the
-    raw body bytes only when the dict actually changed).
-
-    A litellm tier with an empty sampler dict (no `sampler =` line, or
-    all keys stripped) is a no-op -- the canonical pattern for models
-    that reject sampler params.
-    """
-    if not tier.is_litellm or not tier.sampler:
-        return False
-    mutated = False
-    for src, dst in _SAMPLER_BODY_FIELD.items():
-        if src in tier.sampler and dst not in body:
-            body[dst] = tier.sampler[src]
-            mutated = True
-    return mutated
-
-
 def _inject_name_json(raw: bytes, tier_name: str) -> bytes:
     try:
         data = json.loads(raw)
@@ -608,8 +553,6 @@ async def _handle_completion(req: Request, path: str) -> Response:
 
     chosen_name = body.get("model")
     tier = _resolve_tier(chosen_name)
-    if tier is not None and _inject_sampler(body, tier):
-        mutated = True
 
     # litellm tiers ride the same llama-swap dispatch path as gguf
     # tiers: llama-swap registers each litellm tier as an alias of the

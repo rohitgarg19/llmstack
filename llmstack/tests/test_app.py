@@ -9,7 +9,6 @@ from llmstack.app import (
     FAST_MODEL,
     HIGH_FIDELITY_CEILING,
     MID_FIDELITY_CEILING,
-    MULTI_TURN_THRESHOLD,
     ULTRA_MODEL,
     _estimate_tokens,
     _last_user_text,
@@ -151,28 +150,6 @@ class TestClassify:
             model, reason = classify(body)
         assert model == FAST_MODEL
         assert "long-context" in reason
-
-    def test_long_context_many_user_turns_floors_at_agent(self):
-        text = _long_text(MID_FIDELITY_CEILING + 1)
-        msgs = [{"role": "user", "content": text}]
-        for _i in range(MULTI_TURN_THRESHOLD):
-            msgs.append({"role": "assistant", "content": "ok"})
-            msgs.append({"role": "user", "content": "next"})
-        body = {"messages": msgs}
-        with self._with_ultra(False):
-            model, reason = classify(body)
-        assert model == AGENT_MODEL
-        assert "floor" in reason
-
-    def test_tool_messages_do_not_count_as_user_turns(self):
-        text = _long_text(MID_FIDELITY_CEILING + 1)
-        msgs = [{"role": "user", "content": text}]
-        for _ in range(MULTI_TURN_THRESHOLD + 5):
-            msgs.append({"role": "tool", "content": "result"})
-        body = {"messages": msgs}
-        with self._with_ultra(False):
-            model, reason = classify(body)
-        assert model == FAST_MODEL
 
     def test_plan_signal_does_not_route_to_plan(self):
         body = {"messages": _msgs("how would you design a rate limiter?")}

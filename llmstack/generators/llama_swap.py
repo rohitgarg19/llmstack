@@ -191,11 +191,6 @@ def build_metal_defaults(d) -> str:
         "--port ${PORT}",
         f"-ngl {(d.get('n_gpu_layers') or '99').strip()}",
         f"-fa {(d.get('flash_attn') or 'on').strip()}",
-        f"-batch-size {(d.get('batch_size') or '1024').strip()}",
-    ]
-    if is_truthy(d.get("jinja"), default=True):
-        parts.append("--jinja")
-    parts += [
         f"--cache-type-k {(d.get('cache_type_k') or 'q8_0').strip()}",
         f"--cache-type-v {(d.get('cache_type_v') or 'q8_0').strip()}",
         f"--threads {(d.get('threads') or '-1').strip()}",
@@ -214,11 +209,6 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
     ``sampler = ...`` line in ``models.ini`` (already parsed into
     ``tier.sampler``). llama-server then applies them as its defaults
     for any request that does not override them in the body.
-
-    This keeps the per-request injection path (in
-    :func:`llmstack.app._inject_sampler`) litellm-only -- gguf
-    sampling is a server-startup concern, since the CLI flags
-    survive across requests and don't break any backend's schema.
     """
     rope = parse_rope(section.get("rope_scaling", ""))
     sampler = tier.sampler
@@ -266,6 +256,10 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
             f"--rope-scale {scale}",
             f"--yarn-orig-ctx {orig_ctx}",
         ]
+    if tier.chat_template:
+        lines.append(f"--chat-template {tier.chat_template}")
+    else:
+        lines.append("--jinja")
     if "temp" in sampler:
         lines.append(f"--temp {sampler['temp']}")
     if "top_p" in sampler:

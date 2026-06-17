@@ -504,7 +504,6 @@ Router knobs live in `.llmstack/models.ini`; edit and re-run
 | `[DEFAULT] router_port` | `10101` | router listen port |
 | `[ROUTING] high_fidelity_ceiling` | `12000` | tokens; at or below this, route to top tier (ultra → smart fallback). Paired with `code-ultra.ctx_size = 24000` (2x). |
 | `[ROUTING] mid_fidelity_ceiling` | `32000` | tokens; at or below this, route to `code-smart`; beyond, step down to `code-fast`. Paired with `code-smart.ctx_size = 64000` (2x). |
-| `[ROUTING] multi_turn` | `10` | user-turn count that floors the long-context rung at `code-smart`. |
 
 Auto-router rungs (`fast` / `agent` / `ultra`) are resolved by
 matching the `role` field of each `[tier]` block, so renaming a tier

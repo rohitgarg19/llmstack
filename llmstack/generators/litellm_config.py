@@ -29,7 +29,7 @@ Algorithm:
       new stub.
    b. If the ``model_name`` is present but its ``litellm_params.model``
       has drifted from ``models.ini``, update the model string
-      unconditionally.  All other keys in the entry are preserved.
+      unconditionally.  All other keys in the entry are removed.
 4. If nothing changed, return without writing.
 
 This module is read by :mod:`llmstack.commands.install`.
@@ -45,6 +45,11 @@ import yaml
 from llmstack.paths import ensure_litellm_config
 from llmstack.tiers import load_tiers
 
+_SAMPLER_BODY_FIELD = {
+    "temp":    "temperature",
+    "top_p":   "top_p",
+    "rep_pen": "frequency_penalty",
+}
 
 def _desired_entries() -> list[dict[str, Any]]:
     """Walk :func:`load_tiers` and emit a stub per litellm tier (+ _next)."""
@@ -53,14 +58,22 @@ def _desired_entries() -> list[dict[str, Any]]:
         if not tier.is_litellm or tier.litellm is None:
             continue
         base = tier.name
+        litellm_sampler_params = {}
+        for k, v in _SAMPLER_BODY_FIELD.items():
+            if tier.sampler and tier.sampler.get(k) is not None:
+                litellm_sampler_params[v] = tier.sampler[k]
+        litellm_final_params = {"model": tier.litellm.model}
+        litellm_final_params.update(litellm_sampler_params)
         out.append({
             "model_name": base,
-            "litellm_params": {"model": tier.litellm.model},
+            "litellm_params": litellm_final_params,
         })
         if tier.litellm.model_next:
+            litellm_next_params = {"model": tier.litellm.model_next}
+            litellm_next_params.update(litellm_sampler_params)
             out.append({
                 "model_name": f"{base}_next",
-                "litellm_params": {"model": tier.litellm.model_next},
+                "litellm_params": litellm_next_params,
             })
     return out
 
@@ -109,23 +122,16 @@ def merge() -> tuple[Path, list[str], bool]:
 
     for desired_entry in desired:
         name = desired_entry["model_name"]
-        desired_model = desired_entry["litellm_params"]["model"]
 
         if name not in existing_by_name:
             # New tier -- append the stub.
             model_list.append(desired_entry)
             changed.append(name)
         else:
+            # Existing tier -- update the params if it has drifted.
             existing_entry = existing_by_name[name]
-            existing_model = (
-                existing_entry.get("litellm_params") or {}
-            ).get("model")
-            if existing_model != desired_model:
-                # Model string drifted -- update it unconditionally.
-                if not isinstance(existing_entry.get("litellm_params"), dict):
-                    existing_entry["litellm_params"] = {}
-                existing_entry["litellm_params"]["model"] = desired_model
-                changed.append(name)
+            existing_entry["litellm_params"] = desired_entry["litellm_params"]
+            changed.append(name)
 
     if not changed:
         return path, [], False

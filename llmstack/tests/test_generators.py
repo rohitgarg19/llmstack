@@ -55,7 +55,6 @@ description = Mistral uncensored
 [ROUTING]
 high_fidelity_ceiling = 12000
 mid_fidelity_ceiling  = 32000
-multi_turn            = 10
 """
 
 LITELLM_INI = """

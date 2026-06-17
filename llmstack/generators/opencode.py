@@ -47,17 +47,27 @@ import re
 import sys
 from pathlib import Path
 
-from llmstack.paths import AGENTS_TEMPLATE, models_ini_path, remote_url, resolve
+from llmstack.paths import (
+    AGENTS_TEMPLATE,
+    AGENTS_TEMPLATE_PLAN,
+    AGENTS_TEMPLATE_NOFILTER,
+    AGENTS_TEMPLATE_BUILD,
+    AGENTS_TEMPLATE_DEPLOY,
+    models_ini_path,
+    remote_url,
+    resolve
+)
 
 PROVIDER_KEY = "llama-swap"
 API_KEY      = "sk-no-key-required"
 LITELLM_PROXY_PORT = 10103
 
-ROLE_MAP: dict[str, tuple[str, str | None]] = {
-    "fast":            ("small_model", None),
-    "agent":           ("agent",       "build"),
-    "plan":            ("agent",       "plan"),
-    "plan-uncensored": ("agent",       "plan-nofilter"),
+ROLE_MAP: dict[str, tuple[str, str | None, Path | None]] = {
+    "fast":            ("small_model", None,            None),
+    "agent":           ("agent",       "build",         AGENTS_TEMPLATE_BUILD),
+    "plan":            ("agent",       "plan",          AGENTS_TEMPLATE_PLAN),
+    "plan-uncensored": ("agent",       "plan-nofilter", AGENTS_TEMPLATE_NOFILTER),
+    "deploy":          ("agent",       "deploy",        AGENTS_TEMPLATE_DEPLOY),
 }
 
 READ_ONLY_AGENTS = {"plan", "plan-nofilter"}
@@ -344,7 +354,7 @@ def build_config(
             model_entry["reasoning"] = True
         models[sec] = model_entry
 
-        kind, agent_name = ROLE_MAP.get(role, (None, None))
+        kind, agent_name, agent_prompt = ROLE_MAP.get(role, (None, None, None))
         if kind is None:
             continue
 
@@ -367,6 +377,8 @@ def build_config(
         agent: dict = {"model": agent_model_ref}
         if agent_name in READ_ONLY_AGENTS:
             agent["permission"] = {"edit": "deny", "write": "deny", "bash": "deny"}
+        if agent_prompt:
+            agent["prompt"] = agent_prompt.read_text(encoding="utf-8")
         agents[agent_name] = agent  # type: ignore[index]
 
     out: dict = {
@@ -378,14 +390,8 @@ def build_config(
         out["username"] = USERNAME
     if DISABLED_PROVIDERS:
         out["disabled_providers"] = DISABLED_PROVIDERS
-
-    # Resolve agent instructions from project-specific files
-    instructions = []
-    for agent_name in ["plan", "plan-nofilter", "build", "deploy"]:
-        path = Path(os.environ.get("OPENCODE_INSTRUCTIONS", str(AGENTS_TEMPLATE))).parent / f"{agent_name}.md"
-        if path.is_file():
-            instructions.append(str(path))
     
+    instructions = _instructions_paths()
     if instructions:
         out["instructions"] = instructions
 
@@ -401,7 +407,7 @@ def build_config(
     if small_model:
         out["small_model"] = small_model
     if agents:
-        out["agent"] = {k: agents[k] for k in ("build", "plan", "plan-nofilter") if k in agents}
+        out["agent"] = {k: agents[k] for k in ("build", "plan", "plan-nofilter", "deploy") if k in agents}
     out["command"] = {
         name: spec
         for name, spec in COMMANDS.items()

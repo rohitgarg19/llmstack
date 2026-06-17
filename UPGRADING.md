@@ -190,9 +190,6 @@ can roll back cleanly.
 2. Verify the candidate is suitable for the tier.
    - GGUF available?              must exist as a .gguf file
    - Size in budget?              see "tier sizes" table below
-   - Chat template embedded?      open the GGUF page → "Use this model" → llama.cpp tab.
-                                   If --jinja is mentioned or chat_template metadata
-                                   is shown, you're fine.
    - Tool calls supported?        only matters for code-smart. Check that the model
                                    page lists "function calling" or its chat template
                                    handles tool-call blocks.
@@ -205,7 +202,7 @@ can roll back cleanly.
 
        # then bring up llama-server on a throwaway port to test inference:
        llama-server -hf <new-repo> -hff <new-file>.gguf \
-                    --port 9999 -ngl 999 -fa on --jinja \
+                    --port 9999 -ngl 999 -fa on \
                     --cache-type-k q8_0 --cache-type-v q8_0 -c 32768
 
        # in another terminal:

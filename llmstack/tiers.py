@@ -53,7 +53,6 @@ ROUTING_SECTION = "ROUTING"
 ROUTING_DEFAULTS = {
     "high_fidelity_ceiling": 12000,
     "mid_fidelity_ceiling":  32000,
-    "multi_turn":            10,
 }
 
 
@@ -107,7 +106,6 @@ class RoutingConfig:
 
     high_fidelity_ceiling: int = ROUTING_DEFAULTS["high_fidelity_ceiling"]
     mid_fidelity_ceiling: int = ROUTING_DEFAULTS["mid_fidelity_ceiling"]
-    multi_turn: int = ROUTING_DEFAULTS["multi_turn"]
 
 
 @dataclass(frozen=True)
@@ -210,6 +208,7 @@ class Tier:
     litellm: LiteLLMConfig | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
     sampler: dict[str, float] = field(default_factory=dict)
+    chat_template: str | None = None
     max_output_tokens: int | None = None
 
     def files(self) -> list[TierFile]:
@@ -329,6 +328,7 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
                 quant_next=_strip(s.get("quant_next")) or None,
                 file_next=_strip(s.get("hf_file_next")) or None,
                 max_output_tokens=_int(s.get("max_output_tokens", "")) or None,
+                chat_template=_strip(s.get("chat_template")) or None,
             )
         elif backend == BACKEND_LITELLM:
             litellm_cfg = _build_litellm(s)

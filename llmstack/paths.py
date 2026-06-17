@@ -39,7 +39,8 @@ from llmstack._platform import EXE_SUFFIX, user_data_root
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-AGENTS_TEMPLATE = PACKAGE_DIR / "agents/plan.md"
+AGENTS_TEMPLATE = PACKAGE_DIR / "instructions.md"
+AGENTS_TEMPLATE_PLAN = PACKAGE_DIR / "agents/plan.md"
 AGENTS_TEMPLATE_NOFILTER = PACKAGE_DIR / "agents/plan-nofilter.md"
 AGENTS_TEMPLATE_BUILD = PACKAGE_DIR / "agents/build.md"
 AGENTS_TEMPLATE_DEPLOY = PACKAGE_DIR / "agents/deploy.md"
@@ -171,7 +172,7 @@ class Paths:
     llama_swap_bin: Path      # <bin>/llama-swap
     llama_swap_yaml: Path     # <state>/llama-swap.yaml  (was llmstack/llama-swap.yaml)
     opencode_json: Path       # <state>/opencode.json
-    agents_local: Path        # <state>/AGENTS.md (copy of template)
+    agents_local: Path        # <state>/instructions.md (copy of template)
     active_marker: Path       # <state>/active-channel
     default_marker: Path      # <state>/default-channel
     router_pid: Path          # <state>/router.pid
@@ -201,7 +202,7 @@ def resolve() -> Paths:
         llama_swap_bin=bind / f"llama-swap{EXE_SUFFIX}",
         llama_swap_yaml=state / "llama-swap.yaml",
         opencode_json=opencode_dir / "opencode.json",
-        agents_local=state / "AGENTS.md",
+        agents_local=state / "instructions.md",
         active_marker=state / "active-channel",
         default_marker=state / "default-channel",
         router_pid=state / "router.pid",
