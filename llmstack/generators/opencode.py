@@ -278,6 +278,41 @@ def _tier_cost(s) -> dict:
     }
 
 
+def _auto_cost(cfg, tier_sections: list[str]) -> dict:
+    """Cost shown for ``model = auto`` in opencode.
+
+    The router resolves ``auto`` to a concrete tier per request, so there's
+    no single true price. As an estimate:
+
+      * ``ultra`` + ``smart`` present -> average of the two
+      * only ``smart`` -> average of ``fast`` and ``smart``
+      * only ``fast`` (no smart/ultra) -> ``fast`` cost
+      * none of them -> :data:`ZERO_COST` (e.g. all-local, gguf-only stack)
+    """
+    def _cost_for_role(role: str) -> dict | None:
+        for sec in tier_sections:
+            if (cfg[sec].get("role") or "").strip() == role:
+                return _tier_cost(cfg[sec])
+        return None
+
+    def _avg(a: dict, b: dict) -> dict:
+        return {k: (a[k] + b[k]) / 2 for k in ZERO_COST}
+
+    fast  = _cost_for_role("fast")
+    smart = _cost_for_role("agent")
+    ultra = _cost_for_role("ultra")
+
+    if smart is not None and ultra is not None:
+        return _avg(smart, ultra)
+    if smart is not None:
+        return _avg(fast, smart) if fast is not None else smart
+    if ultra is not None:
+        return ultra
+    if fast is not None:
+        return fast
+    return ZERO_COST
+
+
 def build_config(
     ini_path: Path | None = None,
     *,
@@ -376,7 +411,7 @@ def build_config(
             "name":      "Auto (router selects: fast / agent / ultra)",
             "limit":     {"context": auto_ctx, "output": auto_output},
             "tool_call": True,
-            "cost":      ZERO_COST,
+            "cost":      _auto_cost(cfg, tier_sections),
         }
     }
 
