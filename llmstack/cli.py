@@ -37,37 +37,47 @@ Actions:
       First-time walkthrough: kick off GGUF downloads, wait for them, install
       the llama-swap binary, print the shell activation hook, check opencode.
 
-  install [--print] [--current | --next | --external [URL]]
-      Regenerate .llmstack/opencode.json (+ AGENTS.md copy), pin
-      the default channel for the next `start`, and -- for local
-      channels -- render .llmstack/llama-swap.yaml for that channel.
-      The source of tier config depends on channel:
+  init [--force] [--current | --next | --external [URL]]
+      Seed a fresh .llmstack/ in the CURRENT directory (never a parent
+      project, even inside a hook-active shell), decide the channel, and
+      copy the editable input files into it.
 
-        --current / --next (local)
-          Read <work-dir>/.llmstack/models.ini, seeding it from the
-          bundled template on first run. Renders llama-swap.yaml for
-          the chosen channel; `start` consumes it as-is.
+      Channel flags (written to .llmstack/default-channel; read by
+      configure / start / status / the activate hook):
+        --current (default)  local stack, canonical channel
+        --next               local stack, queued-upgrade channel
+        --external [URL]     thin client of a remote router. URL
+                             precedence: flag arg > $LLMSTACK_REMOTE_URL
+                             > http://127.0.0.1:10101 (local router,
+                             for "two projects, one host" zero-config).
 
-        --external [URL] (thin client)
-          Fetch models.ini live from the router (`GET URL/models.ini`)
-          and render opencode.json against that -- no local
-          models.ini is created or kept, and no llama-swap.yaml is
-          written (the router owns the daemons). Re-run `install`
-          any time to pick up router-side edits. URL precedence:
-            flag arg > $LLMSTACK_REMOTE_URL > the local router
-            (http://127.0.0.1:10101).
-          The localhost default is what makes "two projects, one
-          host" work zero-config: install one project local and the
-          others --external.
+      Input files copied: models.ini, instructions.md, agents/*.md,
+      litellm_config.yaml. Existing files are kept as-is by default.
+
+      --force resets the project completely: re-copies every input file
+      from the bundled templates AND clears previously generated outputs
+      (opencode.json, llama-swap.yaml, channel markers) so the next
+      `configure` starts from a clean slate. Use --force when switching
+      a project between local and external mode.
 
       $LLMSTACK_REMOTE_URL set without --external still implies
-      --external (back-compat). The activate hook re-exports this
-      var when you `cd` into an external project, so re-running
-      `install` from inside an active shell never needs the URL or
-      the flag again.
+      --external (the activate hook re-exports it when you cd into an
+      external project, so re-running init from inside an active shell
+      doesn't need the URL or the flag again).
 
-      `--print` writes the rendered opencode.json to stdout instead
-      of files (still fetches the remote in external mode).
+  configure [--print]
+      Generate .llmstack/opencode.json (and llama-swap.yaml for local
+      channels) from the inputs `init` seeded. Reads the channel from
+      .llmstack/default-channel (written by `init`) -- configure has no
+      channel flags of its own. To change channel or mode, re-run:
+        llmstack init [--force] [--current|--next|--external]
+
+      In external mode, fetches models.ini live from the remote router
+      on every run; no local models.ini is needed. In local mode, reads
+      .llmstack/models.ini (seeded by init).
+
+      `--print` writes the rendered opencode.json to stdout instead of
+      files (still fetches the remote in external mode).
 
   install-llama-swap [--force]
       (Re-)download the llama-swap Go binary into $LLMSTACK_BIN_DIR (default
@@ -79,11 +89,11 @@ Actions:
 
   start [--detach] [--host HOST] [--port PORT]
       Bring up llama-swap (:10102) + auto-router (:10101) using the
-      .llmstack/llama-swap.yaml that `install` wrote. Channel is
-      whatever `install` pinned (else `current`); selection is an
-      install-time decision -- `start` does not accept --current /
+      .llmstack/llama-swap.yaml that `configure` wrote. Channel is
+      whatever `configure` pinned (else `current`); selection is a
+      configure-time decision -- `start` does not accept --current /
       --next and does not regenerate the yaml. To change channels or
-      pick up models.ini edits: `llmstack install [--current|--next]`
+      pick up models.ini edits: `llmstack configure [--current|--next]`
       then `llmstack restart`.
 
       --host HOST overrides the address the router listens on (default
@@ -103,8 +113,8 @@ Actions:
       fallback for users who haven't run the activate hook yet.
       `--detach` skips the subshell unconditionally.
 
-      When the project is installed with channel=external (see
-      `install --external`), no daemons are launched: this just
+      When the project is configured with channel=external (see
+      `configure --external`), no daemons are launched: this just
       verifies the pinned remote `GET /models.ini` (which doubles as
       the router's health check -- there's no separate /health route).
 
@@ -128,9 +138,10 @@ Actions:
       Stop the router + llama-swap (and any orphaned llama-server children).
 
   restart [--detach]
-      stop + start. Picks up a freshly-rendered llama-swap.yaml from
-      the most recent `llmstack install` (channel + sampler / ctx_size
-      / GGUF edits in models.ini land here).
+      stop + configure + start. Re-reads models.ini and agent prompts
+      on every restart, so edits land without a separate `configure`
+      step. Channel is whatever `init` pinned in default-channel.
+      Flags (--detach, --host, --port) are forwarded to `start`.
 
   reload
       Emit shell commands that re-export LLMSTACK_CHANNEL +
@@ -138,7 +149,7 @@ Actions:
       prefix for the current channel marker. Pipe through eval to
       apply in-place (no nested subshell):
           eval "$(llmstack reload)"
-      Useful after `install --next && restart` switches channels in an
+      Useful after `configure --next && restart` switches channels in an
       already-active shell -- the activate hook only refreshes on
       chpwd, so without this the prompt would lag until your next cd.
 
@@ -158,9 +169,9 @@ Actions:
 Environment overrides:
   LLMSTACK_REMOTE_URL     base URL of a *remote* llmstack router (e.g.
                           `http://10.0.0.5:10101`). Picked up by
-                          `install` as an alternative to passing
-                          `--external <url>`; once `install` runs, the
-                          channel + URL are persisted in
+                          `configure` as an alternative to passing
+                          `--external <url>`; once `configure` runs,
+                          the channel + URL are persisted in
                           .llmstack/default-channel and that file is
                           the source of truth (the env var is only
                           re-exported by the activate hook for
@@ -172,11 +183,11 @@ Environment overrides:
                           hook (`llmstack activate <shell>`) and by the
                           subshell `start` spawns, set to the project
                           root -- so commands work from any subdirectory
-                          of an installed project. Without the hook,
+                          of a configured project. Without the hook,
                           run from the project root (or set this var).
                           Local daemons are singleton (ports 10101/10102);
                           to consume them from a second project on the
-                          same host, install that project --external.
+                          same host, configure that project --external.
   LLMSTACK_DATA_DIR       persistent user-data root (default:
                           $XDG_DATA_HOME/llmstack). Where the binary lives.
   LLMSTACK_BIN_DIR        override just the binary location.
@@ -191,8 +202,8 @@ Channel labels (LLMSTACK_CHANNEL):
   next       local stack, queued-upgrade channel (orange prompt prefix)
   external   thin client of an llmstack router (medium-purple prompt
              prefix; the URL is shown alongside the project name in the
-             prompt: `[llmstack:<project> <url>]`). The URL is pinned at
-             install time -- typically a remote host, but defaults to
+              prompt: `[llmstack:<project> <url>]`). The URL is pinned at
+              configure time -- typically a remote host, but defaults to
              the local router so two projects on one host can share a
              single set of daemons cleanly.
 

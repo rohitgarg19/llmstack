@@ -1,9 +1,9 @@
 """``llmstack status`` -- show channel, pids, ``/v1/models``, llama-server load.
 
 The channel comes from ``.llmstack/default-channel`` (pinned by
-``install``). Two top-level reporting paths:
+``configure``). Two top-level reporting paths:
 
-  * ``current`` / ``next``  -- local install. Check pid files + port
+  * ``current`` / ``next``  -- local stack. Check pid files + port
                                probes for our daemons. If port :10102
                                responds without a pid file in *this*
                                project's ``.llmstack/``, the daemons
@@ -13,9 +13,9 @@ The channel comes from ``.llmstack/default-channel`` (pinned by
                                it's not an error, but also not
                                something this project can ``stop``
                                cleanly.
-  * ``external``            -- thin-client install. Skip all local
-                               checks; probe the remote-router URL
-                               from the marker.
+  * ``external``            -- thin-client. Skip all local checks;
+                               probe the remote-router URL from the
+                               marker.
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ def _check_local(name: str, url: str) -> None:
     ``responds`` without ``alive`` means the port is in use but the
     process isn't ours -- another project on this host owns it. We
     surface that as ``(other)`` rather than ``shared`` because there's
-    no special "shared" mode anymore: a local install can't manage
-    daemons it didn't spawn. ``llmstack install --external`` is the
+    no special "shared" mode anymore: a local stack can't manage
+    daemons it didn't spawn. ``llmstack configure --external`` is the
     documented way to consume those daemons cleanly.
     """
     paths = resolve()
@@ -167,7 +167,7 @@ def _print_remote_status(paths, url: str) -> int:
         if paths.agents_local.is_file():
             print(f"  instructions  {paths.agents_local}")
     else:
-        print("  opencode      (not generated for this work dir; run: llmstack install)")
+        print("  opencode      (not generated for this work dir; run: llmstack configure)")
 
     if os.environ.get("LLMSTACK_ACTIVE") == "1":
         cfg = os.environ.get("OPENCODE_CONFIG", "?")
@@ -189,9 +189,9 @@ def run(args: list[str]) -> int:
 
     paths = resolve()
 
-    # Channel decision is pinned at install time; status just reads it.
+    # Channel decision is pinned at configure time; status just reads it.
     # active-channel (set by `start`) takes precedence over default-channel
-    # (set by `install`) so a fresh `restart` after `install --next` is
+    # (set by `configure`) so a fresh `restart` after `configure --next` is
     # reflected immediately.
     default = read_marker(paths.default_marker)
     active = read_marker(paths.active_marker)
@@ -229,7 +229,7 @@ def run(args: list[str]) -> int:
         if paths.agents_local.is_file():
             print(f"  instructions  {paths.agents_local}")
     else:
-        print("  opencode      (not generated for this work dir; run: llmstack install)")
+        print("  opencode      (not generated for this work dir; run: llmstack configure)")
 
     if os.environ.get("LLMSTACK_ACTIVE") == "1":
         cfg = os.environ.get("OPENCODE_CONFIG", "?")

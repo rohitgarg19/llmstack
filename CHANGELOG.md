@@ -4,6 +4,41 @@ All notable changes to `opencode-llmstack` are documented here.
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **BREAKING: `install` command split into `init` and `configure`.**
+  - `llmstack init [--force] [--current | --next | --external [URL]]` — seeds
+    `.llmstack/` in the current directory, copies input files (`models.ini`,
+    `instructions.md`, agent prompts, `litellm_config.yaml`), and writes the
+    channel marker (`.llmstack/default-channel`). `--force` resets the project
+    completely, clearing derived outputs so the next `configure` starts fresh.
+    Use `--force` when switching between local and external mode.
+  - `llmstack configure [--print]` — reads the channel marker written by `init`,
+    generates derived outputs (`opencode.json`, `llama-swap.yaml` for local
+    channels, reconciles `litellm_config.yaml`). No channel flags — the channel
+    is already pinned by `init`. In external mode, fetches `models.ini` live
+    from the remote router on every run.
+  - `llmstack restart` now runs `stop → configure → start`, so edits to
+    `models.ini` or agent prompts land without a separate `configure` step.
+  - Agent prompts (`build.md`, `plan.md`, `plan-nofilter.md`, `deploy.md`) are
+    now copied into `.llmstack/agents/` by `init`, allowing per-project edits.
+    The opencode generator reads the per-project copy when present, falling back
+    to the bundled template for projects that haven't run `init`.
+  - Updated all CLI help text, README, UPGRADING.md, and docstrings to reflect
+    the new two-command workflow.
+
+### Deprecated
+- `llmstack install` — now a backward-compatible wrapper that runs
+  `init` then `configure`. Will be removed in a future version; use the
+  two-command workflow directly.
+
+### Fixed
+- `start.py` error messages now correctly reference `init` and `configure`
+  instead of the removed `install` command.
+
+---
+
 ## [0.9.4] — 2026-05-11
 
 ### Fixed

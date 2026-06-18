@@ -53,6 +53,7 @@ from llmstack.paths import (
     AGENTS_TEMPLATE_NOFILTER,
     AGENTS_TEMPLATE_BUILD,
     AGENTS_TEMPLATE_DEPLOY,
+    agent_prompt_path,
     models_ini_path,
     remote_url,
     resolve
@@ -425,7 +426,7 @@ def build_config(
         if agent_name in READ_ONLY_AGENTS:
             agent["permission"] = {"edit": "deny", "write": "deny", "bash": "deny"}
         if agent_prompt:
-            agent["prompt"] = agent_prompt.read_text(encoding="utf-8")
+            agent["prompt"] = agent_prompt_path(agent_prompt).read_text(encoding="utf-8")
         agents[agent_name] = agent  # type: ignore[index]
 
     out: dict = {

@@ -47,6 +47,18 @@ AGENTS_TEMPLATE_DEPLOY = PACKAGE_DIR / "agents/deploy.md"
 MODELS_INI_TEMPLATE = PACKAGE_DIR / "models.ini"
 LITELLM_CONFIG_TEMPLATE = PACKAGE_DIR / "litellm_config.yaml"
 
+# Agent-prompt markdown copied into each project's ``.llmstack/agents/`` by
+# ``llmstack init``. The opencode generator reads the per-project copy (so a
+# user can tweak the prompts per project) and falls back to the bundled
+# template when ``init`` hasn't run. Keyed by the basename written under
+# ``.llmstack/agents/``.
+AGENT_TEMPLATES: dict[str, Path] = {
+    "build.md":          AGENTS_TEMPLATE_BUILD,
+    "plan.md":           AGENTS_TEMPLATE_PLAN,
+    "plan-nofilter.md":  AGENTS_TEMPLATE_NOFILTER,
+    "deploy.md":         AGENTS_TEMPLATE_DEPLOY,
+}
+
 REPO_LLAMA_SWAP = "mostlygeek/llama-swap"
 ROUTER_HOST = "127.0.0.1"
 ROUTER_PORT = 10101
@@ -168,6 +180,7 @@ class Paths:
     data_dir: Path
     bin_dir: Path
     state_dir: Path           # <work>/.llmstack
+    agents_dir: Path          # <state>/agents (per-project agent prompts)
     log_dir: Path             # <state>/logs
     llama_swap_bin: Path      # <bin>/llama-swap
     llama_swap_yaml: Path     # <state>/llama-swap.yaml  (was llmstack/llama-swap.yaml)
@@ -198,6 +211,7 @@ def resolve() -> Paths:
         data_dir=data,
         bin_dir=bind,
         state_dir=state,
+        agents_dir=state / "agents",
         log_dir=state / "logs",
         llama_swap_bin=bind / f"llama-swap{EXE_SUFFIX}",
         llama_swap_yaml=state / "llama-swap.yaml",
@@ -284,6 +298,19 @@ def ensure_litellm_config() -> tuple[Path, bool]:
     import shutil as _shutil
     _shutil.copyfile(LITELLM_CONFIG_TEMPLATE, p.litellm_config)
     return p.litellm_config, True
+
+
+def agent_prompt_path(template: Path) -> Path:
+    """Resolve the agent-prompt file the opencode generator should read.
+
+    ``llmstack init`` copies each bundled agent prompt into
+    ``<work-dir>/.llmstack/agents/`` so it can be edited per project.
+    Prefer that copy when present; otherwise fall back to the bundled
+    package ``template`` so a project that never ran ``init`` (or an
+    older one) still renders.
+    """
+    local = resolve().agents_dir / template.name
+    return local if local.is_file() else template
 
 
 # ---------------------------------------------------------------------------

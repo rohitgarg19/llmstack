@@ -97,14 +97,15 @@ back to `code-smart` so vanilla installs don't 404.
 
 ## opencode integration
 
-`llmstack install` generates an opencode config at
+`llmstack configure` generates an opencode config at
 `<work-dir>/.llmstack/opencode.json` (derived from `models.ini`), where
 `<work-dir>` is whatever directory you ran `llmstack` from (or
 `$LLMSTACK_WORK_DIR`). You can `cd` into any project and run
-`llmstack install` to get a project-local config there. The script also
-copies `AGENTS.md` next to the generated JSON, so the `.llmstack/` folder
-is a self-contained opencode bundle. Your global
-`~/.config/opencode/opencode.json` is **never modified** by this stack.
+`llmstack init && llmstack configure` to get a project-local config there.
+The scripts also copy `instructions.md` and agent prompts next to the
+generated JSON, so the `.llmstack/` folder is a self-contained opencode
+bundle. Your global `~/.config/opencode/opencode.json` is **never modified**
+by this stack.
 
 opencode picks up our config because `llmstack start` (and `llmstack
 shell`) drop you into a subshell with these env vars exported:
@@ -117,10 +118,10 @@ shell`) drop you into a subshell with these env vars exported:
 | `LLMSTACK_ROOT` | absolute path to the installed `llmstack` package |
 
 The llama-swap and router daemons are singleton on ports 10101/10102.
-The channel is **pinned at install time** in `.llmstack/default-channel`
+The channel is **pinned at init time** in `.llmstack/default-channel`
 and never auto-detected at runtime — one project on the host owns the
-daemons (installed local), and any other project on the same host that
-wants to consume them is installed `--external` (defaulting to
+daemons (initialized local), and any other project on the same host that
+wants to consume them is initialized `--external` (defaulting to
 `http://127.0.0.1:10101`). This avoids the footgun where a "shared"
 project's `stop` would tear down daemons it can't bring back up.
 
@@ -178,7 +179,8 @@ llmstack/                       # repo root
     │   └── binary.py           # llama-swap release downloader
     └── commands/               # one module per CLI action
         ├── setup.py            # first-time walkthrough
-        ├── install.py          # generate opencode.json (+ AGENTS.md copy)
+        ├── init.py             # seed .llmstack/ + decide channel
+        ├── configure.py        # generate opencode.json (+ llama-swap.yaml)
         ├── install_llama_swap.py
         ├── download.py
         ├── start.py
@@ -194,10 +196,17 @@ Per-project state (gitignored) is created lazily under `<work-dir>/.llmstack/`:
 
 ```
 .llmstack/
-├── opencode.json          consumed via OPENCODE_CONFIG (written by `install`)
-├── AGENTS.md              copy of the package template (written by `install`)
-├── llama-swap.yaml        generated runtime config (written by `start`)
-├── default-channel        pinned by `llmstack install`
+├── opencode.json          consumed via OPENCODE_CONFIG (written by `configure`)
+├── instructions.md        copy of the package template (written by `init`)
+├── agents/                per-project agent prompts (written by `init`)
+│   ├── build.md
+│   ├── plan.md
+│   ├── plan-nofilter.md
+│   └── deploy.md
+├── models.ini             editable tier config (written by `init`)
+├── litellm_config.yaml    editable proxy config (written by `init`)
+├── llama-swap.yaml        generated runtime config (written by `configure`)
+├── default-channel        pinned by `llmstack init`
 ├── active-channel         written by `llmstack start`, removed by `stop`
 ├── llama-swap.pid         daemon pid files
 ├── router.pid
@@ -232,27 +241,30 @@ sudo sysctl iogpu.wired_limit_mb=57344
 #    re-running it later is safe.
 llmstack setup
 
-# 3. Generate this project's .llmstack/opencode.json (+ AGENTS.md copy).
-#    `install` does NOT touch llama-swap.yaml -- that's regenerated
-#    fresh by `start` for the channel you're booting into.
-llmstack install
+# 3. Seed .llmstack/ with input files (models.ini, instructions.md, etc.)
+#    and decide the channel (local current/next or external).
+llmstack init
 
-# 4. Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
-#    llama-swap + router. With the activate hook installed (see below),
-#    your prompt is already wired to .llmstack/opencode.json -- just run
+# 4. Generate .llmstack/opencode.json and llama-swap.yaml from the inputs
+#    seeded by init. With the activate hook installed (see below), your
+#    prompt is already wired to .llmstack/opencode.json -- just run
 #    `opencode`. Without the hook, `start` falls back to spawning a
 #    subshell with OPENCODE_CONFIG set, prefixed with [llmstack:current].
-#    Daemons keep running when you exit; stop them with `llmstack stop`.
+llmstack configure
+
+# 5. Generate .llmstack/llama-swap.yaml for the chosen channel, bring up
+#    llama-swap + router. Daemons keep running when you exit; stop them
+#    with `llmstack stop`.
 llmstack start
 
-# 4a. Daemons only (no fallback subshell, return immediately).
+# 5a. Daemons only (no fallback subshell, return immediately).
 llmstack start --detach
 
-# 4b. Want auto-activation in any new terminal you cd into? Install once:
+# 5b. Want auto-activation in any new terminal you cd into? Install once:
 eval "$(llmstack activate zsh)"
 # add the same line to ~/.zshrc to make it stick.
 
-# 5. Sanity check (works from any terminal)
+# 6. Sanity check (works from any terminal)
 llmstack status
 curl -s http://127.0.0.1:10101/v1/models | jq '.data[].id'
 curl -s http://127.0.0.1:10101/models.ini | head    # what thin clients see
@@ -274,16 +286,19 @@ py -3 -m venv .venv
 #    %LOCALAPPDATA%\llmstack\bin\llama-swap.exe).
 .venv\Scripts\llmstack setup
 
-# 2. Generate this project's .llmstack\opencode.json (+ AGENTS.md copy).
-.venv\Scripts\llmstack install
+# 2. Seed .llmstack\ with input files and decide the channel.
+.venv\Scripts\llmstack init
 
-# 3. Generate .llmstack\llama-swap.yaml for the chosen channel, bring up
-#    the stack. If you've installed the activate hook (step 4) the
+# 3. Generate .llmstack\opencode.json and llama-swap.yaml from the inputs.
+.venv\Scripts\llmstack configure
+
+# 4. Generate .llmstack\llama-swap.yaml for the chosen channel, bring up
+#    the stack. If you've installed the activate hook (step 5) the
 #    current shell is already wired to .llmstack\opencode.json; otherwise
 #    `start` falls back to spawning a PowerShell subshell.
 .venv\Scripts\llmstack start
 
-# 4. Auto-activate per project from any new PowerShell window. The hook
+# 5. Auto-activate per project from any new PowerShell window. The hook
 #    file is a .ps1 (PowerShell won't dot-source it without that
 #    extension) and dot-sourcing it requires script execution to be
 #    allowed -- if you see "running scripts is disabled on this
@@ -311,53 +326,58 @@ Notes:
 
 ### Thin-client mode (`--external`)
 
-`llmstack install --external [URL]` wires this project as a thin client
+`llmstack init --external [URL]` wires this project as a thin client
 of an llmstack router — no llama-swap, no router, no GGUFs needed
-locally, and **no local `models.ini`**. The thin-client install:
+locally, and **no local `models.ini`**. The thin-client init:
+
+1. Pins `.llmstack/default-channel = "external <url>"` so subsequent
+   commands know they're in client mode.
+2. Copies the input files (models.ini, instructions.md, etc.) as
+   reference, though external projects don't use the local models.ini.
+
+Then `llmstack configure`:
 
 1. Fetches `GET URL/models.ini` live from the router (this also
    doubles as the health check — a 200 with valid INI proves the
    router is up).
 2. Renders `opencode.json` against the fetched content so tier names
    + descriptions agree with what the router actually serves.
-3. Pins `.llmstack/default-channel = "external <url>"` so subsequent
-   commands know they're in client mode.
 
-There is no client-side cache: every `install` re-fetches. To pick up
-a tier edit on the router, just re-run `llmstack install` here.
+There is no client-side cache: every `configure` re-fetches. To pick up
+a tier edit on the router, just re-run `llmstack configure` here.
 
-URL precedence at install time: `--external <url>` arg > `$LLMSTACK_REMOTE_URL`
+URL precedence at init time: `--external <url>` arg > `$LLMSTACK_REMOTE_URL`
 env var > the local router (`http://127.0.0.1:10101`). You normally
 don't set the env var yourself — the activate hook does it for you
-when you `cd` into an external-installed project (see below).
+when you `cd` into an external-initialized project (see below).
 
 Two flavours of the same mode:
 
 **Same host, two projects.** One project owns the daemons (local
-install), the others are thin clients of localhost. Zero config:
+init), the others are thin clients of localhost. Zero config:
 
 ```bash
 # project A — owns the daemons
-cd ~/projA && llmstack install && llmstack start
+cd ~/projA && llmstack init && llmstack configure && llmstack start
 
 # project B — consumes them
-cd ~/projB && llmstack install --external
-                              # baseURL = http://127.0.0.1:10101/v1
-                              # default-channel = "external http://127.0.0.1:10101"
-                              # (no local models.ini -- fetched from project A's router)
-llmstack start                # verifies /models.ini, drops into the client subshell
+cd ~/projB && llmstack init --external
+                            # default-channel = "external http://127.0.0.1:10101"
+llmstack configure          # fetches /models.ini from project A's router
+llmstack start              # verifies /models.ini, drops into the client subshell
 ```
 
 **Different host.** Point at a beefy desktop's router from a laptop:
 
 ```bash
 # laptop -> desktop running llmstack on 10.0.0.5
-llmstack install --external http://10.0.0.5:10101
-llmstack start               # verifies http://10.0.0.5:10101/models.ini
-opencode                     # talks straight to the remote router
+llmstack init --external http://10.0.0.5:10101
+llmstack configure          # fetches http://10.0.0.5:10101/models.ini
+llmstack start              # verifies the remote, drops into the client subshell
+opencode                    # talks straight to the remote router
 ```
 
-(`LLMSTACK_REMOTE_URL=http://10.0.0.5:10101 llmstack install` also
+(`LLMSTACK_REMOTE_URL=http://10.0.0.5:10101 llmstack init --external` also
 works — the env var is honoured as an alternative way in.)
 
 The URL is persisted into the channel marker, so any new terminal you
@@ -365,14 +385,14 @@ open with the activate hook installed (`eval "$(llmstack activate zsh)"`)
 will re-export `LLMSTACK_REMOTE_URL` automatically when you `cd` into
 the project. The prompt is medium-purple with the URL:
 `[llmstack:<project> http://10.0.0.5:10101]`. From inside that
-activated shell, `llmstack install` re-fetches `models.ini` without
+activated shell, `llmstack configure` re-fetches `models.ini` without
 needing the flag or URL again.
 
 The local commands that manage local resources (`setup`, `download`,
-`install-llama-swap`) refuse when the project is installed `--external`.
+`install-llama-swap`) refuse when the project is initialized `--external`.
 `stop` is a no-op (nothing local to tear down) — to stop the daemons
 themselves, run `llmstack stop` from the project that owns them (the
-one installed local).
+one initialized local).
 
 ### Auto-activate per project
 
@@ -400,13 +420,14 @@ command.
 ### Common partial flows
 
 ```bash
-llmstack install                       # opencode.json + AGENTS.md (no GGUF downloads)
+llmstack init                          # seed .llmstack/ + set channel
+llmstack configure                     # generate opencode.json + llama-swap.yaml
+llmstack init --force --next           # reset project to next channel
 llmstack install-llama-swap --force    # re-pull llama-swap binary only
 llmstack setup --skip-download         # full setup minus the GGUF pull
 llmstack setup --skip-wait             # kick off downloads in background, install now
 llmstack check                         # snapshot configured GGUFs + flag drift
-llmstack start --next                  # try queued hf_file_next upgrades (reversible)
-llmstack restart --next                # cycle into the next channel
+llmstack restart                       # stop + configure + start (picks up models.ini edits)
 ```
 
 ### Try each routing path
@@ -496,7 +517,7 @@ For changing to a *different* model entirely (different family/provider) see [UP
 ## Tuning the router
 
 Router knobs live in `.llmstack/models.ini`; edit and re-run
-`llmstack install` to apply (`llmstack restart` to reload daemons).
+`llmstack configure` to apply (`llmstack restart` to reload daemons).
 
 | `models.ini` key | Default | Meaning |
 |---|---|---|
@@ -540,7 +561,7 @@ The `plan-uncensored` tier is accessible via explicit agent selection only:
 Any tier in `models.ini` that declares a `model = <provider>/<model-id>` key is
 served by [LiteLLM](https://docs.litellm.ai/) instead of llama-swap. The same
 tier names + auto-routing apply, so swapping `code-smart` from a local GGUF to
-Claude Sonnet on Anthropic is a `models.ini` edit + `llmstack install` +
+Claude Sonnet on Anthropic is a `models.ini` edit + `llmstack configure` +
 `llmstack restart` away — clients don't change.
 
 ```ini
@@ -558,8 +579,8 @@ description  = Claude Sonnet 4 via Anthropic API - heavy coder for agent loops
 The bundled `models.ini` template ships every tier with a commented-out
 "LiteLLM alternative" block beneath the active GGUF block. To swap a tier:
 comment out the GGUF block, uncomment the litellm block, and run `llmstack
-install && llmstack restart`. The `code-ultra` tier is shipped fenced with
-`AUTO-ENABLE-WHEN-LITELLM-AVAILABLE` markers — `llmstack install`
+configure && llmstack restart`. The `code-ultra` tier is shipped fenced with
+`AUTO-ENABLE-WHEN-LITELLM-AVAILABLE` markers — `llmstack init`
 auto-uncomments it on first seed when `import litellm` succeeds, otherwise
 it stays inert.
 
@@ -610,16 +631,16 @@ export AWS_REGION=eu-west-3
 See [LiteLLM provider docs](https://docs.litellm.ai/docs/providers) for
 provider-specific setup (Bedrock role chaining, Azure deployment names,
 custom endpoints, …). Per-tier credential overrides live in
-`<work-dir>/.llmstack/litellm_config.yaml` — `llmstack install`
+`<work-dir>/.llmstack/litellm_config.yaml` — `llmstack configure`
 non-destructively merges new tier stubs into its `model_list`, so any
 edits you make to existing entries (custom `api_base`, per-model API
 keys via `os.environ/<NAME>`, retries, fallbacks, …) survive across
-installs.
+configures.
 
 | Key (in `models.ini`) | Meaning |
 |---|---|
 | `model` | LiteLLM model id (`anthropic/claude-sonnet-4-...`, `openai/gpt-4o-...`, `bedrock/eu.anthropic.claude-...`, `groq/llama-3.1-70b-...`, etc.). Required. |
-| `model_next` | Queued upgrade target. Mirrors gguf `hf_file_next`: `llmstack install --next` swaps the tier to this model id until you switch back; permanent promotion is `model` edit + `llmstack install`. |
+| `model_next` | Queued upgrade target. Mirrors gguf `hf_file_next`: `llmstack init --next` swaps the tier to this model id until you switch back; permanent promotion is `model` edit + `llmstack configure`. |
 | `max_output_tokens` | Cap on output tokens for the tier. Useful for cost discipline on top-tier models. |
 | `backend = litellm` | Optional explicit override; auto-detected when `model` is set. |
 
@@ -653,7 +674,7 @@ in `llmstack check` with the model id instead of HF metadata, and in
 `channel: current|next` metadata field so clients can tell which model
 id they're actually talking to.
 
-`llmstack install --next` flips both backends in lock-step: gguf tiers
+`llmstack init --next` flips both backends in lock-step: gguf tiers
 swap to `hf_file_next` and litellm tiers swap to `model_next` (the
 router subprocess sees `LLMSTACK_USE_NEXT=1` and rewrites
 `body["model"]` to `<tier>_next`, which llama-swap routes to the

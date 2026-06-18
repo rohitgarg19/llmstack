@@ -47,8 +47,9 @@ def run(args: list[str]) -> int:
     if is_remote():
         print(f"[!] external mode is in effect ({remote_url()}); setup is local-only.")
         print("    in client mode you only need:")
-        print("      llmstack install --external      # generate .llmstack/opencode.json (points at remote)")
-        print("      llmstack start                   # verify remote + enter the client subshell")
+        print("      llmstack init --external              # seed .llmstack/ + set external channel")
+        print("      llmstack configure                    # generate .llmstack/opencode.json (points at remote)")
+        print("      llmstack start                        # verify remote + enter the client subshell")
         return 1
 
     if not skip_download:
@@ -135,7 +136,8 @@ def run(args: list[str]) -> int:
         print("  npm install -g opencode-ai")
         print()
         print("After installing, run:")
-        print("  llmstack install     # generate configs for this project")
+        print("  llmstack init        # seed .llmstack/ input files")
+        print("  llmstack configure   # generate configs for this project")
         print("  llmstack start       # bring up the stack")
         return 0
 
@@ -147,8 +149,9 @@ def run(args: list[str]) -> int:
         print(f"  1. Run (and paste into {rc_hint} for persistence): {activate_line}")
     else:
         print("  1. Source the generated hook in your shell rc (see above)")
-    print("  2. llmstack install     # generate .llmstack/ configs for this project")
-    print("  3. llmstack start       # bring up the stack")
+    print("  2. llmstack init        # seed .llmstack/ input files")
+    print("  3. llmstack configure   # generate .llmstack/ configs for this project")
+    print("  4. llmstack start       # bring up the stack")
     print()
     print("To check configured GGUFs + drift vs models.ini:")
     print("  llmstack check")

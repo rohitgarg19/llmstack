@@ -1,18 +1,18 @@
 """``llmstack start`` -- bring up the stack and enter the env-prepared subshell.
 
-The channel is **decided at install time** and persisted to
+The channel is **decided at init time** and persisted to
 ``.llmstack/default-channel`` -- ``start`` reads that marker and never
 re-derives the channel from the environment or per-launch flags.
-``llmstack install`` also renders ``llama-swap.yaml`` for the pinned
-channel, so ``start`` never regenerates the yaml: to switch channels
-or pick up edits in ``models.ini``, re-run ``llmstack install``
-(``--current`` / ``--next``) and then ``llmstack restart``. Three
-channels exist:
+``llmstack configure`` renders ``llama-swap.yaml`` for the pinned
+channel; ``start`` never regenerates the yaml. To switch channels or
+pick up edits in ``models.ini``, re-run ``llmstack restart`` (which
+runs stop → configure → start) or ``llmstack init [--force]`` to
+change the channel. Three channels exist:
 
   *Local* (``current`` / ``next``)
     Launch llama-swap + the FastAPI router locally and drop into a
     subshell with ``OPENCODE_CONFIG`` exported. The yaml on disk is
-    authoritative -- whatever ``install`` wrote is what gets loaded.
+    authoritative -- whatever ``configure`` wrote is what gets loaded.
 
     Daemon state has two branches:
       (a) local pid file says daemons are up   -> idempotent, no-op
@@ -23,8 +23,8 @@ channels exist:
                                                   process (typically
                                                   another project on
                                                   this host) we refuse:
-                                                  the user should
-                                                  ``llmstack install --external``
+                                                  the user should run
+                                                  ``llmstack init --external``
                                                   to wire this project
                                                   as a thin client of
                                                   those daemons, or stop
@@ -33,8 +33,8 @@ channels exist:
   *External* (``external``)
     Don't launch anything; verify the marker's ``/health`` endpoint is
     reachable and drop into the subshell with ``LLMSTACK_CHANNEL=external``.
-    The URL was pinned by ``llmstack install --external [URL]``; an
-    external install with no URL defaults to the local router
+    The URL was pinned by ``llmstack init --external [URL]``; an
+    external project with no URL defaults to the local router
     (``http://127.0.0.1:10101``), which is the laptop-with-N-projects
     case where one project owns the daemons and the others are clients.
 """
@@ -121,8 +121,8 @@ def _start_remote(detach: bool, url: str) -> int:
 
     if not paths.opencode_json.is_file():
         raise SystemExit(
-            f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install --external\n"
-            f"    (or `llmstack install --external {url}` to keep this remote URL)"
+            f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack configure\n"
+            f"    (or `llmstack init --external {url} && llmstack configure` to set the remote URL)"
         )
 
     print(f"[*] external llmstack: {url}")
@@ -208,8 +208,8 @@ def run(args: list[str]) -> int:
         else:
             print(f"[!] unknown arg to start: {arg} (try --detach, --host, --port, -h)")
             print(
-                "    note: --current / --next belong to `llmstack install` -- "
-                "the channel is pinned at install time and start just honours it.",
+                "    note: --current / --next belong to `llmstack init` -- "
+                "the channel is pinned at init time and start just honours it.",
                 file=sys.stderr,
             )
             return 2
@@ -237,10 +237,10 @@ def run(args: list[str]) -> int:
     if not paths.llama_swap_bin.exists() or not os.access(paths.llama_swap_bin, os.X_OK):
         raise SystemExit(f"missing {paths.llama_swap_bin} (run: llmstack setup)")
     if not paths.opencode_json.is_file():
-        raise SystemExit(f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack install")
+        raise SystemExit(f"no .llmstack/opencode.json in {paths.work_dir} -- run: llmstack configure")
     if not paths.llama_swap_yaml.is_file():
         raise SystemExit(
-            f"no .llmstack/llama-swap.yaml in {paths.work_dir} -- run: llmstack install"
+            f"no .llmstack/llama-swap.yaml in {paths.work_dir} -- run: llmstack configure"
         )
 
     tiers = load_tiers()
@@ -272,10 +272,10 @@ def run(args: list[str]) -> int:
             "another project on this host).",
             file=sys.stderr,
         )
-        print("    This project is installed for local mode -- it expects to own", file=sys.stderr)
+        print("    This project is configured for local mode -- it expects to own", file=sys.stderr)
         print("    those daemons. To run as a thin client of the running stack:", file=sys.stderr)
         print("", file=sys.stderr)
-        print("        llmstack install --external", file=sys.stderr)
+        print("        llmstack init --external && llmstack configure", file=sys.stderr)
         print("", file=sys.stderr)
         print("    (--external defaults to http://127.0.0.1:10101, the local router.)", file=sys.stderr)
         print("    To take over instead, stop the running daemons first:", file=sys.stderr)
@@ -294,8 +294,8 @@ def run(args: list[str]) -> int:
                 file=sys.stderr,
             )
             print(
-                "    add a *_next line to a tier and re-run `llmstack install --next`, "
-                "or `llmstack install --current` to leave next mode.",
+                "    add a *_next line to a tier and re-run `llmstack init --next && llmstack restart`, "
+                "or `llmstack init --current && llmstack restart` to leave next mode.",
                 file=sys.stderr,
             )
             return 1
@@ -373,8 +373,8 @@ def run(args: list[str]) -> int:
     print(f"  tail -f {paths.log_dir}/llama-swap.log")
     print(f"  tail -f {paths.log_dir}/router.log")
     print()
-    print("Switch channel (re-pin at install time, then restart):")
-    print(f"  llmstack install --{other} && llmstack restart")
+    print("Switch channel (re-pin at init time, then restart):")
+    print(f"  llmstack init --{other} && llmstack restart")
     print()
     print("Stop:")
     print("  llmstack stop")
