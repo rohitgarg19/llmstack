@@ -49,14 +49,14 @@ from pathlib import Path
 
 from llmstack.paths import (
     AGENTS_TEMPLATE,
-    AGENTS_TEMPLATE_PLAN,
-    AGENTS_TEMPLATE_NOFILTER,
     AGENTS_TEMPLATE_BUILD,
     AGENTS_TEMPLATE_DEPLOY,
+    AGENTS_TEMPLATE_NOFILTER,
+    AGENTS_TEMPLATE_PLAN,
     agent_prompt_path,
     models_ini_path,
     remote_url,
-    resolve
+    resolve,
 )
 
 PROVIDER_KEY = "llama-swap"
@@ -438,7 +438,7 @@ def build_config(
         out["username"] = USERNAME
     if DISABLED_PROVIDERS:
         out["disabled_providers"] = DISABLED_PROVIDERS
-    
+
     instructions = _instructions_paths()
     if instructions:
         out["instructions"] = instructions

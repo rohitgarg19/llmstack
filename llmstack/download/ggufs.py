@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from llmstack._platform import detached_popen, popen, find_pids
+from llmstack._platform import detached_popen, find_pids, popen
 from llmstack.paths import ensure_state_dirs, require_models_ini, resolve
 from llmstack.tiers import iter_download_targets, load_tiers
 

@@ -14,7 +14,7 @@ def run(args: list[str]) -> int:
     # Parse args to separate init flags from configure flags
     init_args = []
     configure_args = []
-    
+
     # All install args are init args (--force, --current, --next, --external, --print)
     # We need to handle --print specially: it goes to configure, not init
     print_only = False
@@ -30,13 +30,13 @@ def run(args: list[str]) -> int:
         else:
             init_args.append(arg)
         i += 1
-    
+
     # Run init (unless --print only)
     if not print_only:
         rc = init.run(init_args)
         if rc not in (0, None):
             return rc
-    
+
     # Run configure
     return configure.run(configure_args)
 

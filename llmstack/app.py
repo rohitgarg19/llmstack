@@ -322,7 +322,6 @@ def classify(body: dict[str, Any]) -> tuple[str, str]:
                     ULTRA_MODEL, AGENT_MODEL)
         return AGENT_MODEL, f"ultra-trigger->agent ({ULTRA_MODEL} unavailable)"
 
-    n_turns = sum(1 for m in (messages or []) if m.get("role") == "user")
     est = _estimate_tokens(messages, prompt)
 
     # Rung 1: short context -- start at the top.

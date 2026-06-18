@@ -239,7 +239,7 @@ class Tier:
         if self.backend != BACKEND_GGUF or not (self.repo and self.file):
             return []
         out = [TierFile(self.name, self.role, "current", self.repo, self.file, self.quant)]
-        if self.file_next != None and self.quant_next != None:
+        if self.file_next is not None and self.quant_next is not None:
             out.append(TierFile(
                 self.name, self.role, "next",
                 self.repo_next or self.repo, self.file_next, self.quant_next
