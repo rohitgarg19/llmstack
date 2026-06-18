@@ -61,6 +61,15 @@ def _int(value: str, default: int = 0) -> int:
     return int(m.group()) if m else default
 
 
+_FLOAT_RE = re.compile(r"[0-9]*\.?[0-9]+")
+
+
+def _float(value: str | None) -> float | None:
+    """Parse the first float-like token from *value*, or return ``None``."""
+    m = _FLOAT_RE.search(value or "")
+    return float(m.group()) if m else None
+
+
 def parse_sampler(raw: str) -> dict[str, float]:
     """Parse a ``sampler = temp=0.5, top_p=0.85, top_k=20, ...`` line.
 
@@ -159,11 +168,25 @@ class LiteLLMConfig:
     rest of the time the active ``model`` is used. Permanent promotion is
     the same as gguf: edit ``model`` in models.ini and re-run
     ``llmstack install``.
+
+    Pricing (optional, for opencode cost display)
+    ---------------------------------------------
+    ``price_input_per_1m``, ``price_output_per_1m``,
+    ``price_cache_read_per_1m``, ``price_cache_write_per_1m`` are USD
+    per 1 million tokens. When set, the opencode generator emits real
+    cost metadata so opencode can display ``$ spent`` per request.
+    When absent (``None``) the generator falls back to zero, which
+    suppresses the cost display -- the same behaviour as before this
+    feature was added.
     """
 
     model: str
     model_next: str | None = None
     max_output_tokens: int | None = None
+    price_input_per_1m: float | None = None
+    price_output_per_1m: float | None = None
+    price_cache_read_per_1m: float | None = None
+    price_cache_write_per_1m: float | None = None
 
     @property
     def has_next(self) -> bool:
@@ -274,6 +297,10 @@ def _build_litellm(section) -> LiteLLMConfig:
         model=model,
         model_next=_opt(section.get("model_next")),
         max_output_tokens=_int(section.get("max_output_tokens", "")) or None,
+        price_input_per_1m=_float(section.get("price_input_per_1m")),
+        price_output_per_1m=_float(section.get("price_output_per_1m")),
+        price_cache_read_per_1m=_float(section.get("price_cache_read_per_1m")),
+        price_cache_write_per_1m=_float(section.get("price_cache_write_per_1m")),
     )
 
 

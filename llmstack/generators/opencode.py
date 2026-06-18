@@ -223,11 +223,58 @@ def _mcp_block(
 
 ZERO_COST = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 DIGITS    = re.compile(r"\d+")
+_FLOAT_RE = re.compile(r"[0-9]*\.?[0-9]+")
 
 
 def _int(value: str, default: int) -> int:
     m = DIGITS.search(value or "")
     return int(m.group()) if m else default
+
+
+def _parse_float(value: str | None) -> float | None:
+    m = _FLOAT_RE.search(value or "")
+    return float(m.group()) if m else None
+
+
+def _is_litellm_section(s) -> bool:
+    """True when a models.ini section is litellm-backed."""
+    backend = (s.get("backend") or "").strip()
+    if backend == "litellm":
+        return True
+    return not backend and bool((s.get("model") or "").strip())
+
+
+def _tier_cost(s) -> dict:
+    """Return an opencode cost dict for a models.ini section.
+
+    For litellm-backed tiers the operator can declare pricing in
+    ``models.ini`` using USD-per-1M-token keys:
+
+        price_input_per_1m       = 3.0
+        price_output_per_1m      = 15.0
+        price_cache_read_per_1m  = 0.30   ; optional
+        price_cache_write_per_1m = 3.75   ; optional
+
+    opencode's cost schema uses USD-per-1M-tokens, so the values are
+    passed through as-is to ``opencode.json``. Missing keys default to
+    0 so the dict is always fully populated.
+
+    For gguf (local) tiers all fields are 0 -- local inference has no
+    per-token dollar cost.
+    """
+    if not _is_litellm_section(s):
+        return ZERO_COST
+
+    def _price(key: str) -> float:
+        v = _parse_float(s.get(key))
+        return v if v is not None else 0.0
+
+    return {
+        "input":        _price("price_input_per_1m"),
+        "output":       _price("price_output_per_1m"),
+        "cache_read":   _price("price_cache_read_per_1m"),
+        "cache_write":  _price("price_cache_write_per_1m"),
+    }
 
 
 def build_config(
@@ -348,7 +395,7 @@ def build_config(
             "name":      desc,
             "limit":     {"context": ctx, "output": output},
             "tool_call": True,
-            "cost":      ZERO_COST,
+            "cost":      _tier_cost(s),
         }
         if role in ("agent", "plan-uncensored"):
             model_entry["reasoning"] = True
