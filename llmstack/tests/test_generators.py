@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from llmstack.generators.opencode import build_config
-from llmstack.paths import MODELS_INI_TEMPLATE
+from llmstack.paths import EXAMPLES_DIR
 
 GGUF_INI = """
 [DEFAULT]
@@ -13,8 +13,8 @@ router_host  = 127.0.0.1
 router_port  = 10101
 
 [code-fast]
-tier     = code
-role     = fast
+tier     = subagent
+role     = build
 hf_repo  = bartowski/Qwen2.5-Coder-3B-Instruct-GGUF
 hf_file  = Qwen2.5-Coder-3B-Instruct-Q5_K_M.gguf
 ctx_size = 131072
@@ -23,8 +23,8 @@ sampler  = temp=0.2
 description = Qwen2.5-Coder 3B fast
 
 [code-smart]
-tier     = code
-role     = agent
+tier     = agent
+role     = build
 hf_repo  = unsloth/Qwen3-Coder-Next-GGUF
 hf_file  = Qwen3-Coder-Next-Q4_K_M.gguf
 ctx_size = 64000
@@ -33,8 +33,8 @@ sampler  = temp=0.5
 description = Qwen3-Coder-Next agent
 
 [plan]
-tier     = chat
-role     = plan
+tier     = agent
+role     = chat
 hf_repo  = Jackrong/Qwopus-GLM-18B-Merged-GGUF
 hf_file  = Qwopus-GLM-18B-Healed-Q4_K_M.gguf
 ctx_size = 65536
@@ -43,8 +43,8 @@ sampler  = temp=0.7
 description = Qwopus plan
 
 [plan-uncensored]
-tier     = chat
-role     = plan-uncensored
+tier     = agent
+role     = nofilter-chat
 hf_repo  = mradermacher/Mistral-Small-3.2-24B-Instruct-GGUF
 hf_file  = Mistral-Small.gguf
 ctx_size = 131072
@@ -63,8 +63,8 @@ router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]
-tier         = code
-role         = fast
+tier         = subagent
+role         = build
 backend      = litellm
 model        = anthropic/claude-haiku-4-5-20251001
 ctx_size     = 200000
@@ -72,8 +72,8 @@ max_output_tokens = 4096
 description  = Haiku fast
 
 [code-smart]
-tier         = code
-role         = agent
+tier         = agent
+role         = build
 backend      = litellm
 model        = anthropic/claude-sonnet-4-20250514
 ctx_size     = 200000
@@ -131,9 +131,6 @@ class TestBuildConfigGguf:
     def test_plan_agent_is_read_only(self):
         perm = self.cfg["agent"]["plan"]["permission"]
         assert perm["bash"] == "deny"
-
-    def test_plan_nofilter_agent_present(self):
-        assert "plan-nofilter" in self.cfg["agent"]
 
     def test_all_tiers_in_models(self):
         models = self.cfg["provider"]["llama-swap"]["models"]
@@ -221,24 +218,24 @@ router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]
-tier     = code
-role     = fast
+tier     = subagent
+role     = build
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 32768
 description = fast tier
 
 [code-smart]
-tier     = code
-role     = agent
+tier     = agent
+role     = build
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 65536
 description = agent tier
 
 [plan]
-tier     = chat
-role     = plan
+tier     = agent
+role     = chat
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 65536
@@ -266,32 +263,32 @@ router_host = 127.0.0.1
 router_port = 10101
 
 [code-fast]
-tier     = code
-role     = fast
+tier     = subagent
+role     = build
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 32768
 description = fast tier
 
 [code-smart]
-tier     = code
-role     = agent
+tier     = agent
+role     = build
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 65536
 description = agent tier
 
 [plan]
-tier     = chat
-role     = plan
+tier     = agent
+role     = chat
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 65536
 description = plan tier
 
 [plan-uncensored]
-tier     = chat
-role     = plan-uncensored
+tier     = agent
+role     = nofilter-chat
 hf_repo  = owner/repo
 hf_file  = model.gguf
 ctx_size = 65536
@@ -319,15 +316,11 @@ class TestOutputLimitFallbacks:
         models = self.cfg["provider"]["llama-swap"]["models"]
         assert models["plan-uncensored"]["limit"]["output"] == 32768
 
-    def test_plan_output_falls_back_to_8192(self):
-        models = self.cfg["provider"]["llama-swap"]["models"]
-        assert models["plan"]["limit"]["output"] == 8192
-
 
 class TestLlamaSwapRender:
     @pytest.fixture(autouse=True)
     def use_bundled_models_ini(self, monkeypatch):
-        monkeypatch.setenv("LLMSTACK_MODELS_INI", str(MODELS_INI_TEMPLATE))
+        monkeypatch.setenv("LLMSTACK_MODELS_INI", str(EXAMPLES_DIR / "gguf" / "models.ini"))
 
     def test_render_returns_string(self):
         from llmstack.generators.llama_swap import render as render_llama_swap

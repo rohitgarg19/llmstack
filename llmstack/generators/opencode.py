@@ -51,7 +51,6 @@ from llmstack.paths import (
     AGENTS_TEMPLATE,
     AGENTS_TEMPLATE_BUILD,
     AGENTS_TEMPLATE_DEPLOY,
-    AGENTS_TEMPLATE_NOFILTER,
     AGENTS_TEMPLATE_PLAN,
     agent_prompt_path,
     models_ini_path,
@@ -63,15 +62,13 @@ PROVIDER_KEY = "llama-swap"
 API_KEY      = "sk-no-key-required"
 LITELLM_PROXY_PORT = 10103
 
-ROLE_MAP: dict[str, tuple[str, str | None, Path | None]] = {
-    "fast":            ("small_model", None,            None),
-    "agent":           ("agent",       "build",         AGENTS_TEMPLATE_BUILD),
-    "plan":            ("agent",       "plan",          AGENTS_TEMPLATE_PLAN),
-    "plan-uncensored": ("agent",       "plan-nofilter", AGENTS_TEMPLATE_NOFILTER),
-    "deploy":          ("agent",       "deploy",        AGENTS_TEMPLATE_DEPLOY),
+ROLE_MAP: dict[str, tuple[str, Path]] = {
+    "build":   ("build",  AGENTS_TEMPLATE_BUILD),
+    "chat":    ("plan",   AGENTS_TEMPLATE_PLAN),
+    "publish": ("deploy", AGENTS_TEMPLATE_DEPLOY),
 }
 
-READ_ONLY_AGENTS = {"plan", "plan-nofilter"}
+READ_ONLY_AGENTS = {"plan"}
 
 # Slash-command shortcuts (no `/fast`: `auto` already routes trivial chat).
 COMMANDS = {
@@ -79,12 +76,18 @@ COMMANDS = {
         "template":    "Review the following for trade-offs, risks, and follow-ups. Be concrete.",
         "description": "Architectural review via the planning model.",
         "agent":       "plan",
+        "model":       "code-smart"
     },
     "nofilter": {
-        "template":    "",
         "description": "Route to the uncensored planning model.",
-        "agent":       "plan-nofilter",
+        "agent":       "plan",
+        "model":       "plan-uncensored"
     },
+    "fast": {
+        "description": "Route to fast model",
+        "agent":       "build",
+        "model":       "code-fast"
+    }
 }
 
 SHARE        = os.getenv("OPENCODE_SHARE", "disabled")
@@ -387,7 +390,7 @@ def build_config(
         (
             _int(cfg[s].get("ctx_size", ""), 0)
             for s in tier_sections
-            if (cfg[s].get("role") or "").strip() == "fast"
+            if (cfg[s].get("tier") or "").strip() == "subagent"
         ),
         0,
     )
@@ -400,7 +403,7 @@ def build_config(
         (
             _int(cfg[s].get("max_output_tokens", ""), 0)
             for s in tier_sections
-            if (cfg[s].get("role") or "").strip() == "fast"
+            if (cfg[s].get("tier") or "").strip() == "subagent"
         ),
         0,
     )
@@ -420,11 +423,12 @@ def build_config(
 
     for sec in tier_sections:
         s    = cfg[sec]
+        tier = (s.get("tier") or "").strip()
         role = (s.get("role") or "").strip()
         ctx  = _int(s.get("ctx_size", ""), 8192)
         desc = (s.get("description") or sec).strip()
 
-        _default_output = 32768 if role in ("agent", "plan-uncensored") else 8192
+        _default_output = 32768 if tier != "subagent" else 8192
         output = _int(s.get("max_output_tokens", ""), 0) or _default_output
 
         model_entry: dict = {
@@ -432,18 +436,19 @@ def build_config(
             "limit":     {"context": ctx, "output": output},
             "tool_call": True,
             "cost":      _tier_cost(s),
+            "reasoning": True,
         }
-        if role in ("agent", "plan-uncensored"):
-            model_entry["reasoning"] = True
+
         models[sec] = model_entry
 
-        kind, agent_name, agent_prompt = ROLE_MAP.get(role, (None, None, None))
-        if kind is None:
+        model_ref = f"{PROVIDER_KEY}/{sec}"
+
+        if tier == "subagent":
+            small_model = model_ref
             continue
 
-        model_ref = f"{PROVIDER_KEY}/{sec}"
-        if kind == "small_model":
-            small_model = model_ref
+        agent_name, agent_prompt = ROLE_MAP.get(role, (None, None))
+        if not agent_name:
             continue
 
         # `build` is always wired to the auto router so escalation to
@@ -490,11 +495,11 @@ def build_config(
     if small_model:
         out["small_model"] = small_model
     if agents:
-        out["agent"] = {k: agents[k] for k in ("build", "plan", "plan-nofilter", "deploy") if k in agents}
+        out["agent"] = agents
     out["command"] = {
         name: spec
         for name, spec in COMMANDS.items()
-        if not spec.get("agent") or spec.get("agent") in agents
+        if not spec.get("agent") or (spec.get("agent") in agents and spec.get("model") in models)
     }
     mcp = _mcp_block(rurl, has_litellm=_has_litellm_tier(cfg))
     if mcp:

@@ -41,10 +41,9 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 
 AGENTS_TEMPLATE = PACKAGE_DIR / "instructions.md"
 AGENTS_TEMPLATE_PLAN = PACKAGE_DIR / "agents/plan.md"
-AGENTS_TEMPLATE_NOFILTER = PACKAGE_DIR / "agents/plan-nofilter.md"
 AGENTS_TEMPLATE_BUILD = PACKAGE_DIR / "agents/build.md"
 AGENTS_TEMPLATE_DEPLOY = PACKAGE_DIR / "agents/deploy.md"
-MODELS_INI_TEMPLATE = PACKAGE_DIR / "models.ini"
+EXAMPLES_DIR = PACKAGE_DIR / "examples"
 LITELLM_CONFIG_TEMPLATE = PACKAGE_DIR / "litellm_config.yaml"
 
 # Agent-prompt markdown copied into each project's ``.llmstack/agents/`` by
@@ -55,7 +54,6 @@ LITELLM_CONFIG_TEMPLATE = PACKAGE_DIR / "litellm_config.yaml"
 AGENT_TEMPLATES: dict[str, Path] = {
     "build.md":          AGENTS_TEMPLATE_BUILD,
     "plan.md":           AGENTS_TEMPLATE_PLAN,
-    "plan-nofilter.md":  AGENTS_TEMPLATE_NOFILTER,
     "deploy.md":         AGENTS_TEMPLATE_DEPLOY,
 }
 
@@ -254,31 +252,6 @@ def require_models_ini() -> Path:
             "    set $LLMSTACK_MODELS_INI or run `llmstack install` to seed one"
         )
     return p
-
-
-def ensure_models_ini() -> tuple[Path, bool]:
-    """Resolve ``models.ini``, seeding the canonical location from the
-    bundled template when nothing exists yet. Returns ``(path, seeded)``
-    where ``seeded`` is ``True`` only when we just wrote the file.
-
-    Lookup follows :func:`models_ini_path`. When neither the canonical
-    nor the legacy location has a file, the seed is written to the
-    canonical path: ``<work-dir>/.llmstack/models.ini`` (or wherever
-    ``$LLMSTACK_MODELS_INI`` points).
-    """
-    p = models_ini_path()
-    if p.is_file():
-        return p, False
-    if not MODELS_INI_TEMPLATE.is_file():
-        raise SystemExit(
-            f"[!] models.ini not found at {p} and no bundled template at "
-            f"{MODELS_INI_TEMPLATE}\n"
-            "    reinstall the llmstack package or set $LLMSTACK_MODELS_INI"
-        )
-    p.parent.mkdir(parents=True, exist_ok=True)
-    import shutil as _shutil
-    _shutil.copyfile(MODELS_INI_TEMPLATE, p)
-    return p, True
 
 def ensure_litellm_config() -> tuple[Path, bool]:
     """Resolve ``litellm_config.yaml``, seeding the canonical location from the

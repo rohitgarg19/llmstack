@@ -45,8 +45,8 @@ from llmstack.paths import (
     AGENT_TEMPLATES,
     AGENTS_TEMPLATE,
     DEFAULT_REMOTE_URL,
+    EXAMPLES_DIR,
     LITELLM_CONFIG_TEMPLATE,
-    MODELS_INI_TEMPLATE,
     ChannelMark,
     env_remote_url,
     write_marker,
@@ -114,7 +114,7 @@ def _try_enable_litellm_blocks(ini_path: Path) -> int:
 
 def _print_help() -> None:
     print(
-        "usage: llmstack init [--force] "
+        "usage: llmstack init [--force] [--variant gguf|bedrock]"
         "[--current | --next | --external [URL]]"
     )
 
@@ -127,6 +127,7 @@ def _parse_args(args: list[str]) -> tuple[bool, str, str | None, bool]:
     and is mutually exclusive with ``--current`` / ``--next``.
     """
     force = False
+    variant = "gguf"
     local_channel = "current"
     local_explicit = False
     external_url: str | None = None
@@ -151,13 +152,19 @@ def _parse_args(args: list[str]) -> tuple[bool, str, str | None, bool]:
         elif arg.startswith("--external="):
             want_external = True
             external_url = arg[len("--external="):]
+        elif arg == "--variant":
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                variant = args[i + 1]
+                i += 1
+        elif arg.startswith("--variant="):
+            variant = arg[len("--variant="):]
         elif arg in ("-h", "--help"):
             _print_help()
             raise SystemExit(0)
         else:
             print(
                 f"[!] unknown arg to init: {arg} "
-                "(try --force, --current, --next, --external, -h)"
+                "(try --force, --variant, --current, --next, --external, -h)"
             )
             raise SystemExit(2)
         i += 1
@@ -168,7 +175,7 @@ def _parse_args(args: list[str]) -> tuple[bool, str, str | None, bool]:
         )
         raise SystemExit(2)
 
-    return force, local_channel, external_url, want_external
+    return force, variant, local_channel, external_url, want_external
 
 
 def _resolve_external_url(flag_url: str | None) -> str:
@@ -201,7 +208,7 @@ def _copy(src: Path, dst: Path, *, force: bool) -> str:
 
 def run(args: list[str]) -> int:
     try:
-        force, local_channel, external_url_arg, want_external = _parse_args(args)
+        force, variant, local_channel, external_url_arg, want_external = _parse_args(args)
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else 0
 
@@ -252,9 +259,10 @@ def run(args: list[str]) -> int:
     # the router's live copy), but we seed it anyway so the user has a
     # reference and can switch back to local mode later.
     models_dst = state / "models.ini"
-    result = _copy(MODELS_INI_TEMPLATE, models_dst, force=force)
+    models_desired = EXAMPLES_DIR / variant / "models.ini"
+    result = _copy(models_desired, models_dst, force=force)
     if result == "missing":
-        print(f"[!] models.ini template not found at {MODELS_INI_TEMPLATE}; skipping")
+        print(f"[!] models.ini template not found at {models_desired}; skipping")
     elif result == "kept":
         print(f"[=] models.ini exists -- kept {models_dst}")
     else:

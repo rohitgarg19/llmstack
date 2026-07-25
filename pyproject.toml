@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-llmstack"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 description = "Multi-tier local LLM stack: llama-swap + FastAPI auto-router + opencode wiring."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,7 +56,7 @@ include = ["llmstack*"]
 exclude = ["llmstack.bin*", "llmstack.tests*"]
 
 [tool.setuptools.package-data]
-llmstack = ["agents/plan.md", "agents/plan-nofilter.md", "agents/build.md", "agents/deploy.md", "models.ini", "litellm_config.yaml"]
+llmstack = ["agents/plan.md", "agents/build.md", "agents/deploy.md", "examples/anthropic/models.ini", "examples/bedrock/models.ini", "examples/gguf/models.ini", "litellm_config.yaml"]
 
 [tool.setuptools.data-files]
 "" = ["LICENSE", "CHANGELOG.md", "UPGRADING.md"]

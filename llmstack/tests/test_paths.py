@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from llmstack.paths import MODELS_INI_TEMPLATE, models_ini_path, require_models_ini
+from llmstack.paths import EXAMPLES_DIR, models_ini_path, require_models_ini
 
 
 @pytest.fixture(autouse=True)
 def use_bundled_models_ini(monkeypatch):
-    monkeypatch.setenv("LLMSTACK_MODELS_INI", str(MODELS_INI_TEMPLATE))
+    monkeypatch.setenv("LLMSTACK_MODELS_INI", str(EXAMPLES_DIR / "gguf" / "models.ini"))
 
 
 class TestModelsIniPath:

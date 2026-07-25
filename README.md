@@ -423,6 +423,7 @@ command.
 llmstack init                          # seed .llmstack/ + set channel
 llmstack configure                     # generate opencode.json + llama-swap.yaml
 llmstack init --force --next           # reset project to next channel
+llmstack init --variant=bedrock        # install bedrock based models.ini instead of gguf
 llmstack install-llama-swap --force    # re-pull llama-swap binary only
 llmstack setup --skip-download         # full setup minus the GGUF pull
 llmstack setup --skip-wait             # kick off downloads in background, install now

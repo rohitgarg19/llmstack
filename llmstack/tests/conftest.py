@@ -16,6 +16,6 @@ from __future__ import annotations
 
 import os
 
-from llmstack.paths import PACKAGE_DIR
+from llmstack.paths import EXAMPLES_DIR
 
-os.environ["LLMSTACK_MODELS_INI"] = str(PACKAGE_DIR / "models.ini")
+os.environ["LLMSTACK_MODELS_INI"] = str(EXAMPLES_DIR / "gguf" / "models.ini")
