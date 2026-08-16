@@ -79,11 +79,13 @@ COMMANDS = {
         "model":       "code-smart"
     },
     "nofilter": {
+        "template":    "Run planning without filter",
         "description": "Route to the uncensored planning model.",
         "agent":       "plan",
         "model":       "plan-uncensored"
     },
     "fast": {
+        "template":    "Execute the ask without printing lot of text",
         "description": "Route to fast model",
         "agent":       "build",
         "model":       "code-fast"

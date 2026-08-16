@@ -246,7 +246,7 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
     lines += [
         f"-hf {active_repo}",
         f"-hff {active_file}",
-        f"--alias {tier.name}",
+        f"--alias {tier.name}-{tier.role}",
         f"-c {tier.ctx_size}",
     ]
     if rope:
