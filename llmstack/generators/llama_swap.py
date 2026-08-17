@@ -15,10 +15,10 @@ macro, the ``matrix`` and the ``on_startup.preload`` list) and per-tier
                           ``all_chats_with_fast`` super-set when there
                           are 2+ chat tiers.
   - ``preload``         = every tier with ``role == "fast"``
+  - ``aliases``         = names ``a, b, c``
 
 Per-tier defaults (overridable in the ini per section):
 
-  - ``aliases`` : :data:`ROLE_ALIASES`\\[role]   (override: ``aliases = a, b, c``)
   - ``ttl``     : :data:`ROLE_TTL`\\[role]       (override: ``ttl = 0``)
 
 CLI (kept for scripting; the public entry point is ``llmstack install``):
@@ -145,13 +145,6 @@ ROLE_LETTER: dict[str, str] = {
     "publish":       "p",
 }
 
-ROLE_ALIASES: dict[str, list[str]] = {
-    "build":          ["agent", "smart", "code", "coder"],
-    "chat":           ["plan", "planner", "chat"],
-    "nofilter-chat":  ["uncensored", "nofilter", "plan-nofilter", "heretic"],
-    "publish":        ["deploy", "create", "publish", "release"],
-}
-
 ROLE_TTL: dict[str, int] = {
     "build":           3600,
     "publish":         1000,
@@ -168,7 +161,7 @@ SIZE_RE = re.compile(r"[\d.]+")
 
 def parse_rope(raw: str) -> tuple[int, int] | None:
     m = ROPE_RE.search(raw or "")
-    return (int(m.group(1)), int(m.group(2)), str(m.group(3))) if m else None
+    return (int(m.group(1)), int(m.group(2)), m.group(3)) if m else None
 
 
 def parse_size_gb(raw: str, default: float = 5.0) -> float:
@@ -275,13 +268,11 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
 
     return "\n".join(lines) + "\n"
 
-
 def aliases_for(tier, section) -> list[str]:
     explicit = (section.get("aliases") or "").strip()
     if explicit:
         return [a.strip() for a in explicit.split(",") if a.strip()]
-    return list(ROLE_ALIASES.get(tier.role, [tier.role]))
-
+    return None
 
 def ttl_for(tier, section) -> int:
     explicit = (section.get("ttl") or "").strip()

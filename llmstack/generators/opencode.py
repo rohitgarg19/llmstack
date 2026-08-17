@@ -47,6 +47,7 @@ import re
 import sys
 from pathlib import Path
 
+from llmstack.generators.llama_swap import TIER_SUBAGENT
 from llmstack.paths import (
     AGENTS_TEMPLATE,
     AGENTS_TEMPLATE_BUILD,
@@ -76,19 +77,19 @@ COMMANDS = {
         "template":    "Review the following for trade-offs, risks, and follow-ups. Be concrete.",
         "description": "Architectural review via the planning model.",
         "agent":       "plan",
-        "model":       "code-smart"
+        "model":       f"{PROVIDER_KEY}/code-smart"
     },
     "nofilter": {
         "template":    "Run planning without filter",
         "description": "Route to the uncensored planning model.",
         "agent":       "plan",
-        "model":       "plan-uncensored"
+        "model":       f"{PROVIDER_KEY}/plan-uncensored"
     },
     "fast": {
         "template":    "Execute the ask without printing lot of text",
         "description": "Route to fast model",
         "agent":       "build",
-        "model":       "code-fast"
+        "model":       f"{PROVIDER_KEY}/code-fast"
     }
 }
 
@@ -392,7 +393,7 @@ def build_config(
         (
             _int(cfg[s].get("ctx_size", ""), 0)
             for s in tier_sections
-            if (cfg[s].get("tier") or "").strip() == "subagent"
+            if (cfg[s].get("tier") or "").strip() == TIER_SUBAGENT
         ),
         0,
     )
@@ -405,7 +406,7 @@ def build_config(
         (
             _int(cfg[s].get("max_output_tokens", ""), 0)
             for s in tier_sections
-            if (cfg[s].get("tier") or "").strip() == "subagent"
+            if (cfg[s].get("tier") or "").strip() == TIER_SUBAGENT
         ),
         0,
     )
@@ -430,7 +431,7 @@ def build_config(
         ctx  = _int(s.get("ctx_size", ""), 8192)
         desc = (s.get("description") or sec).strip()
 
-        _default_output = 32768 if tier != "subagent" else 8192
+        _default_output = 32768 if tier != TIER_SUBAGENT else 8192
         output = _int(s.get("max_output_tokens", ""), 0) or _default_output
 
         model_entry: dict = {
@@ -445,7 +446,7 @@ def build_config(
 
         model_ref = f"{PROVIDER_KEY}/{sec}"
 
-        if tier == "subagent":
+        if tier == TIER_SUBAGENT:
             small_model = model_ref
             continue
 
@@ -501,7 +502,7 @@ def build_config(
     out["command"] = {
         name: spec
         for name, spec in COMMANDS.items()
-        if not spec.get("agent") or (spec.get("agent") in agents and spec.get("model") in models)
+        if not spec.get("agent") or (spec.get("agent") in agents and spec.get("model").replace(f"{PROVIDER_KEY}/", "") in models)
     }
     mcp = _mcp_block(rurl, has_litellm=_has_litellm_tier(cfg))
     if mcp:
