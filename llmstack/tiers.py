@@ -219,6 +219,7 @@ class Tier:
 
     name: str
     role: str
+    tier: str
     backend: str
     description: str
     ctx_size: int
@@ -338,6 +339,7 @@ def load_tiers(ini_path: Path | None = None) -> dict[str, Tier]:
         common = {
             "name":        sec,
             "role":        _strip(s.get("role")),
+            "tier":        _strip(s.get("tier")),
             "backend":     backend,
             "description": _strip(s.get("description")) or sec,
             "ctx_size":    _int(s.get("ctx_size", "")),

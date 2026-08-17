@@ -48,6 +48,7 @@ class TestTier:
     def test_gguf_tier(self):
         tier = Tier(
             name="code-fast",
+            tier="subagent",
             role="agent",
             backend=BACKEND_GGUF,
             description="Fast coder",
@@ -64,6 +65,7 @@ class TestTier:
         )
         tier = Tier(
             name="plan",
+            tier="agent",
             role="chat",
             backend=BACKEND_LITELLM,
             description="Plan mode",
@@ -76,7 +78,8 @@ class TestTier:
     def test_has_next_gguf_with_file_next(self):
         tier = Tier(
             name="code-smart",
-            role="agent",
+            role="build",
+            tier="agent",
             backend=BACKEND_GGUF,
             description="Smart coder",
             ctx_size=64000,
@@ -94,6 +97,7 @@ class TestTier:
         tier = Tier(
             name="plan",
             role="chat",
+            tier="agent",
             backend=BACKEND_LITELLM,
             description="Plan mode",
             ctx_size=64000,
@@ -106,6 +110,7 @@ class TestTier:
         tier = Tier(
             name="plan",
             role="chat",
+            tier="agent",
             backend=BACKEND_LITELLM,
             description="Plan mode",
             ctx_size=64000,

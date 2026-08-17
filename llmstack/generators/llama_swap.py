@@ -41,11 +41,13 @@ import yaml
 
 from llmstack._platform import EXE_SUFFIX, IS_WINDOWS
 from llmstack.paths import models_ini_path, resolve
-from llmstack.tiers import _int, load_tiers
+from llmstack.tiers import _int, load_tiers, BACKEND_GGUF
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
 LITELLM_PROXY_PORT = 10103
 LITELLM_PROXY_NAME = "litellm_proxy"
+TIER_AGENT = "agent"
+TIER_SUBAGENT = "subagent"
 
 
 def _default_llama_server_bin() -> str:
@@ -137,28 +139,28 @@ def build_litellm_proxy_cmd() -> str:
     )
 
 ROLE_LETTER: dict[str, str] = {
-    "fast":            "f",
-    "agent":           "c",
-    "plan":            "p",
-    "plan-uncensored": "u",
+    "build":         "b",
+    "chat":          "c",
+    "nofilter-chat": "nc",
+    "publish":       "p",
 }
 
 ROLE_ALIASES: dict[str, list[str]] = {
-    "fast":            ["fast", "small", "autocomplete"],
-    "agent":           ["agent", "smart", "code", "coder"],
-    "plan":            ["plan", "planner", "chat"],
-    "plan-uncensored": ["uncensored", "nofilter", "plan-nofilter", "heretic"],
+    "build":          ["agent", "smart", "code", "coder"],
+    "chat":           ["plan", "planner", "chat"],
+    "nofilter-chat":  ["uncensored", "nofilter", "plan-nofilter", "heretic"],
+    "publish":        ["deploy", "create", "publish", "release"],
 }
 
 ROLE_TTL: dict[str, int] = {
-    "fast":            0,
-    "agent":           1800,
+    "build":           3600,
+    "publish":         1000,
     "plan":            1200,
-    "plan-uncensored": 1200,
+    "plan-uncensored": 900,
 }
 
 ROPE_RE = re.compile(
-    r"yarn\s*\(\s*scale\s*=\s*(\d+)\s*,\s*orig_ctx\s*=\s*(\d+)\s*\)",
+    r"yarn\s*\(\s*scale\s*=\s*(\d+)\s*,\s*orig_ctx\s*=\s*(\d+)\s*,\s*type\s*=\s*(.+)\s*\)",
     re.IGNORECASE,
 )
 SIZE_RE = re.compile(r"[\d.]+")
@@ -166,7 +168,7 @@ SIZE_RE = re.compile(r"[\d.]+")
 
 def parse_rope(raw: str) -> tuple[int, int] | None:
     m = ROPE_RE.search(raw or "")
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    return (int(m.group(1)), int(m.group(2)), str(m.group(3))) if m else None
 
 
 def parse_size_gb(raw: str, default: float = 5.0) -> float:
@@ -195,7 +197,6 @@ def build_metal_defaults(d) -> str:
         f"--cache-type-v {(d.get('cache_type_v') or 'q8_0').strip()}",
         f"--threads {(d.get('threads') or '-1').strip()}",
         "--no-warmup",
-        "--no-mmap",
     ]
     return " ".join(parts)
 
@@ -250,11 +251,12 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
         f"-c {tier.ctx_size}",
     ]
     if rope:
-        scale, orig_ctx = rope
+        scale, orig_ctx, model_type = rope
         lines += [
             "--rope-scaling yarn",
             f"--rope-scale {scale}",
             f"--yarn-orig-ctx {orig_ctx}",
+            f"--override-kv {model_type or "qwen2"}.context_length=int:{tier.ctx_size}",
         ]
     if tier.chat_template:
         lines.append(f"--chat-template {tier.chat_template}")
@@ -372,34 +374,41 @@ def build_matrix(cfg) -> dict | None:
     tiers = load_tiers()
     vars_: dict[str, str] = {}
     evict: dict[str, int] = {}
+    subagents = [(name, t) for name, t in tiers.items() 
+                    if t.tier == TIER_SUBAGENT and t.backend == BACKEND_GGUF]
+    agents = [(name, t) for name, t in tiers.items()
+                    if t.tier == TIER_AGENT and t.backend == BACKEND_GGUF]
 
-    for name, tier in tiers.items():
-        if not tier.is_gguf:
-            continue
+    for name, tier in subagents:
         letter = ROLE_LETTER.get(tier.role)
         if not letter or letter in vars_:
             continue
-        vars_[letter] = name
+        vars_[f"{letter}s"] = name
         size_gb = parse_size_gb(cfg[name].get("size_gb", ""), default=5.0)
-        evict[letter] = evict_cost(size_gb)
+        evict[f"{letter}s"] = evict_cost(size_gb)
 
-    # No gguf tiers at all -- omit the matrix key so llama-swap doesn't
+    # No gguf subagent tiers at all -- omit the matrix key so llama-swap doesn't
     # attempt to validate an empty sets block.
     if not vars_:
         return None
 
     sets: dict[str, str] = {}
-    fast = "f"
-    if fast in vars_:
-        for letter, name in vars_.items():
-            if letter == fast:
-                continue
-            slug = (tiers[name].role or letter).replace("-", "_")
-            sets[f"{slug}_with_fast"] = f"{fast} & {letter}"
-        chat_letters = [letter for letter in vars_ if letter not in (fast, "c")]
-        if len(chat_letters) >= 2:
-            sets["all_chats_with_fast"] = f"{fast} & " + " & ".join(chat_letters)
+    for name, tier in agents:
+        letter = ROLE_LETTER.get(tier.role)
+        if not letter:
+            continue
+        slug = name.replace("-", "_")
+        for small_key, small_name in vars_.items():
+            small_slug = small_name.replace("-", "_")
+            sets[f"{slug}_with_{small_slug}"] = f"{letter} & {small_key}"
 
+    for name, tier in agents:
+        letter = ROLE_LETTER.get(tier.role)
+        if not letter or letter in vars_:
+            continue
+        vars_[f"{letter}"] = name
+        size_gb = parse_size_gb(cfg[name].get("size_gb", ""), default=5.0)
+        evict[f"{letter}"] = evict_cost(size_gb)
     return {"vars": vars_, "evict_costs": evict, "sets": sets}
 
 
