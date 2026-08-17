@@ -41,7 +41,7 @@ import yaml
 
 from llmstack._platform import EXE_SUFFIX, IS_WINDOWS
 from llmstack.paths import models_ini_path, resolve
-from llmstack.tiers import _int, load_tiers, BACKEND_GGUF
+from llmstack.tiers import BACKEND_GGUF, _int, load_tiers
 
 USE_NEXT_ENV = "LLMSTACK_USE_NEXT"
 LITELLM_PROXY_PORT = 10103
@@ -256,7 +256,7 @@ def build_cmd(tier, section, *, use_next: bool = False) -> str:
             "--rope-scaling yarn",
             f"--rope-scale {scale}",
             f"--yarn-orig-ctx {orig_ctx}",
-            f"--override-kv {model_type or "qwen2"}.context_length=int:{tier.ctx_size}",
+            f"--override-kv {model_type}.context_length=int:{tier.ctx_size}",
         ]
     if tier.chat_template:
         lines.append(f"--chat-template {tier.chat_template}")
@@ -374,7 +374,7 @@ def build_matrix(cfg) -> dict | None:
     tiers = load_tiers()
     vars_: dict[str, str] = {}
     evict: dict[str, int] = {}
-    subagents = [(name, t) for name, t in tiers.items() 
+    subagents = [(name, t) for name, t in tiers.items()
                     if t.tier == TIER_SUBAGENT and t.backend == BACKEND_GGUF]
     agents = [(name, t) for name, t in tiers.items()
                     if t.tier == TIER_AGENT and t.backend == BACKEND_GGUF]
